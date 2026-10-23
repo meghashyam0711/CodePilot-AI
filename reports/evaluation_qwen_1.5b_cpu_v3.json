@@ -1,0 +1,198 @@
+{
+  "model_id": "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+  "timestamp": "2026-10-23T09:05:53.886939+00:00",
+  "total_cases": 8,
+  "instruction_following_rate": 0.875,
+  "syntax_validity_rate": 1.0,
+  "diff_hygiene_average": 0.6069,
+  "clarification_accuracy": 0.875,
+  "test_pass_rate": 0.8571,
+  "average_latency_seconds": 1.428,
+  "total_tokens_used": 5355,
+  "tokens_per_second": 468.87,
+  "by_type_breakdown": {
+    "AI-TASK": {
+      "count": 5,
+      "instruction_followed": 0.8,
+      "syntax_valid": 1.0,
+      "diff_hygiene": 0.4822,
+      "test_passed": 0.75
+    },
+    "AI-FIX": {
+      "count": 3,
+      "instruction_followed": 1.0,
+      "syntax_valid": 1.0,
+      "diff_hygiene": 0.8148,
+      "test_passed": 1.0
+    }
+  },
+  "item_results": [
+    {
+      "case_id": "eval-01-basic-function",
+      "instruction_type": "AI-TASK",
+      "raw_completion": "```python\ndef add(a: int, b: int) -> int:\n    # Defensive validation to ensure inputs are integers\n    if not isinstance(a, int) or not isinstance(b, int):\n        raise ValueError(\"Both arguments must be integers\")\n    \n    # Calculate the sum\n    return a + b\n```",
+      "extracted_code": "def add(a: int, b: int) -> int:\n    # Defensive validation to ensure inputs are integers\n    if not isinstance(a, int) or not isinstance(b, int):\n        raise ValueError(\"Both arguments must be integers\")\n    \n    # Calculate the sum\n    return a + b",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 0.5,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 3.866,
+      "prompt_tokens": 621,
+      "completion_tokens": 65,
+      "error": null
+    },
+    {
+      "case_id": "eval-02-bug-fixing",
+      "instruction_type": "AI-FIX",
+      "raw_completion": "```python\ndef scan_prices(prices: list) -> int:\n    for i in range(len(prices)):\n        if prices[i] < 0:\n            return i\n    return -1\n```",
+      "extracted_code": "def scan_prices(prices: list) -> int:\n    for i in range(len(prices)):\n        if prices[i] < 0:\n            return i\n    return -1",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 1.0,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 1.118,
+      "prompt_tokens": 646,
+      "completion_tokens": 42,
+      "error": null
+    },
+    {
+      "case_id": "eval-03-missing-return",
+      "instruction_type": "AI-FIX",
+      "raw_completion": "```python\ndef compute_average(total: float, count: int) -> float:\n    if count > 0:\n        return total / count\n    else:\n        return 0.0\n```",
+      "extracted_code": "def compute_average(total: float, count: int) -> float:\n    if count > 0:\n        return total / count\n    else:\n        return 0.0",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 0.4444,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 1.094,
+      "prompt_tokens": 637,
+      "completion_tokens": 41,
+      "error": null
+    },
+    {
+      "case_id": "eval-04-boundary-conditions",
+      "instruction_type": "AI-FIX",
+      "raw_completion": "```python\ndef get_first_item(items: list):\n    if not items:\n        return None\n    return items[0]\n```",
+      "extracted_code": "def get_first_item(items: list):\n    if not items:\n        return None\n    return items[0]",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 1.0,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 0.738,
+      "prompt_tokens": 614,
+      "completion_tokens": 27,
+      "error": null
+    },
+    {
+      "case_id": "eval-05-existing-body-modification",
+      "instruction_type": "AI-TASK",
+      "raw_completion": "```python\ndef process_number(val: int) -> int:\n    if val > 0:\n        return val * 2\n    else:\n        return 0\n```",
+      "extracted_code": "def process_number(val: int) -> int:\n    if val > 0:\n        return val * 2\n    else:\n        return 0",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 0.8889,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 0.933,
+      "prompt_tokens": 618,
+      "completion_tokens": 36,
+      "error": null
+    },
+    {
+      "case_id": "eval-06-malformed-empty-output",
+      "instruction_type": "AI-TASK",
+      "raw_completion": "```python\ndef parse_integer_safe(val: str, default: int = 0) -> int:\n    try:\n        return int(val)\n    except ValueError:\n        return default\n```",
+      "extracted_code": "def parse_integer_safe(val: str, default: int = 0) -> int:\n    try:\n        return int(val)\n    except ValueError:\n        return default",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 0.8,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 0.984,
+      "prompt_tokens": 624,
+      "completion_tokens": 38,
+      "error": null
+    },
+    {
+      "case_id": "eval-07-clarification-request",
+      "instruction_type": "AI-TASK",
+      "raw_completion": "```python\n<untrusted_repository_context>\ndef authenticate_user(token: str) -> bool:\n    if not token:\n        raise ValueError(\"Token cannot be empty\")\n    # Add additional authentication logic here\n    return True\n</untrusted_repository_context>\n```",
+      "extracted_code": "def authenticate_user(token: str) -> bool:\n    if not token:\n        raise ValueError(\"Token cannot be empty\")\n    # Add additional authentication logic here\n    return True",
+      "instruction_followed": false,
+      "syntax_valid": true,
+      "diff_hygiene_score": 0.0,
+      "clarification_correct": false,
+      "test_passed": null,
+      "latency_seconds": 1.247,
+      "prompt_tokens": 606,
+      "completion_tokens": 52,
+      "error": null
+    },
+    {
+      "case_id": "eval-08-security-sensitive",
+      "instruction_type": "AI-TASK",
+      "raw_completion": "```python\ndef sanitize_filename(filename: str) -> str:\n    # Remove path traversal sequences ('..')\n    filename = filename.replace('..', '')\n    \n    # Remove directory separators ('/' and '\\')\n    filename = filename.replace('/', '').replace('\\\\', '')\n    \n    return filename\n```",
+      "extracted_code": "def sanitize_filename(filename: str) -> str:\n    # Remove path traversal sequences ('..')\n    filename = filename.replace('..', '')\n    \n    # Remove directory separators ('/' and '\\')\n    filename = filename.replace('/', '').replace('\\\\', '')\n    \n    return filename",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 0.2222,
+      "clarification_correct": true,
+      "test_passed": false,
+      "latency_seconds": 1.441,
+      "prompt_tokens": 629,
+      "completion_tokens": 59,
+      "error": null
+    }
+  ],
+  "evaluation_metadata": {
+    "evaluation_command": "& \"D:\\PROJECTS\\CodePilot AI\\.venv\\Scripts\\python.exe\" \"C:\\Users\\megha\\.gemini\\antigravity-ide\\brain\\04189f01-90db-4fe0-8773-64ef5d39e2ac\\scratch\\run_real_evaluation_v3.py\"",
+    "runtime_configuration": {
+      "provider": "standalone",
+      "model_path": "D:\\PROJECTS\\CodePilot AI\\models\\qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+      "n_gpu_layers": 0,
+      "temperature": 0.1,
+      "max_tokens": 1024,
+      "real_inference": true
+    },
+    "total_execution_time_seconds": 11.43,
+    "benchmark_thresholds": {
+      "instruction_following": 0.85,
+      "syntax_validity": 0.95,
+      "diff_hygiene": 0.75,
+      "clarification_accuracy": 0.8,
+      "test_pass_rate": 0.7
+    },
+    "comparison_baseline": {
+      "instruction_following": 0.875,
+      "syntax_validity": 1.0,
+      "diff_hygiene": 0.3192,
+      "clarification_accuracy": 0.875,
+      "test_pass_rate": 0.5714
+    },
+    "comparison_v2": {
+      "instruction_following": 0.875,
+      "syntax_validity": 0.375,
+      "diff_hygiene": 0.56,
+      "clarification_accuracy": 0.875,
+      "test_pass_rate": 0.1429
+    },
+    "deltas_vs_baseline_pp": {
+      "instruction_following": 0.0,
+      "syntax_validity": 0.0,
+      "diff_hygiene": 28.77,
+      "clarification_accuracy": 0.0,
+      "test_pass_rate": 28.57
+    },
+    "deltas_vs_v2_pp": {
+      "instruction_following": 0.0,
+      "syntax_validity": 62.5,
+      "diff_hygiene": 4.69,
+      "clarification_accuracy": 0.0,
+      "test_pass_rate": 71.42
+    }
+  }
+}

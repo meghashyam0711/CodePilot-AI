@@ -1,0 +1,85 @@
+# ==============================================================================
+# CodePilot AI — Proposed QLoRA Fine-Tuning Configuration (Phase 5 Design)
+# Target Hardware: Laptop with 32 GB RAM + NVIDIA GeForce RTX 4060 (8 GB VRAM)
+# Note: Designed for Phase 6 execution. Do NOT execute in Phase 5.
+# ==============================================================================
+
+model:
+  base_model_name_or_path: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+  model_revision: "main"
+  tokenizer_name_or_path: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+  license: "Apache-2.0"
+  model_architecture: "Qwen2ForCausalLM"
+  context_window_supported: 32768
+  training_sequence_length: 2048
+
+quantization:
+  method: "bitsandbytes_4bit"
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"                # NormalFloat4 for optimal information entropy
+  bnb_4bit_use_double_quant: true           # Quantize quantization constants (~0.37 bits/param saved)
+  bnb_4bit_compute_dtype: "bfloat16"        # Fast compute on Ada Lovelace (RTX 4060)
+
+lora:
+  r: 16                                     # LoRA attention rank
+  lora_alpha: 32                            # Scaling factor (alpha / r = 2.0)
+  lora_dropout: 0.05                        # Regularization to prevent overfitting on code
+  bias: "none"
+  target_modules:                           # All linear projections in self-attention & MLP
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  task_type: "CAUSAL_LM"
+
+training_hyperparameters:
+  learning_rate: 2.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  optim: "paged_adamw_8bit"                 # Offloads optimizer states dynamically to prevent OOM
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 8            # Effective batch size = 2 * 8 = 16
+  num_train_epochs: 3
+  max_grad_norm: 0.3
+  gradient_checkpointing: true              # Required: saves ~60% activation memory
+  fp16: false
+  bf16: true                                # Hardware supported on RTX 4060 (SM 8.9)
+  group_by_length: true                     # Buckets similar length sequences for throughput
+
+checkpoints_and_logging:
+  logging_steps: 10
+  eval_steps: 50
+  save_steps: 50
+  save_total_limit: 3                       # Keep top 3 checkpoints only (saves disk)
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+  output_dir: "./training/checkpoints/qwen2.5-coder-1.5b-codepilot-lora"
+
+hardware_budget_estimates:
+  target_gpu: "NVIDIA GeForce RTX 4060 Laptop (8,192 MB VRAM)"
+  estimated_vram_breakdown:
+    base_model_4bit: "1,150 MB"
+    lora_parameters: "85 MB"
+    optimizer_states_8bit: "250 MB"
+    activations_with_checkpointing: "2,800 MB"
+    cuda_runtime_context: "450 MB"
+    peak_vram_usage: "4,735 MB (~4.6 GB)"
+    headroom_on_8gb_card: "3,457 MB (~3.4 GB reserved for display & OS)"
+  estimated_disk_requirements:
+    base_model_weights_cache: "3.2 GB"
+    dataset_and_indices: "25 MB"
+    lora_adapter_weights: "85 MB"
+    checkpoints_top3: "260 MB"
+    exported_gguf_q4km: "1.1 GB"
+    total_disk_required: "4.7 GB"
+
+recovery_strategy:
+  resume_from_checkpoint: true
+  checkpoint_dir: "./training/checkpoints/qwen2.5-coder-1.5b-codepilot-lora"
+  fallback: "If training is interrupted, load the latest checkpoint-*.pt and resume without data loss."

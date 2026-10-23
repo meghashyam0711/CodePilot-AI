@@ -1,0 +1,268 @@
+{
+  "model_id": "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+  "timestamp": "2026-10-23T10:24:54.533618+00:00",
+  "total_cases": 8,
+  "instruction_following_rate": 0.875,
+  "syntax_validity_rate": 0.875,
+  "diff_hygiene_average": 0.6,
+  "clarification_accuracy": 0.875,
+  "test_pass_rate": 0.8571,
+  "average_latency_seconds": 1.549,
+  "total_tokens_used": 5357,
+  "tokens_per_second": 432.17,
+  "by_type_breakdown": {
+    "AI-TASK": {
+      "count": 5,
+      "instruction_followed": 0.8,
+      "syntax_valid": 0.8,
+      "diff_hygiene": 0.46,
+      "test_passed": 0.75
+    },
+    "AI-FIX": {
+      "count": 3,
+      "instruction_followed": 1.0,
+      "syntax_valid": 1.0,
+      "diff_hygiene": 0.8333,
+      "test_passed": 1.0
+    }
+  },
+  "item_results": [
+    {
+      "case_id": "eval-01-basic-function",
+      "instruction_type": "AI-TASK",
+      "raw_completion": "```python\ndef add(a: int, b: int) -> int:\n    return a + b\n```",
+      "extracted_code": "def add(a: int, b: int) -> int:\n    return a + b",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 1.0,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 2.854,
+      "prompt_tokens": 675,
+      "completion_tokens": 23,
+      "error": null
+    },
+    {
+      "case_id": "eval-02-bug-fixing",
+      "instruction_type": "AI-FIX",
+      "raw_completion": "```python\ndef scan_prices(prices: list) -> int:\n    for i in range(len(prices)):\n        if prices[i] < 0:\n            return i\n    return -1\n```",
+      "extracted_code": "def scan_prices(prices: list) -> int:\n    for i in range(len(prices)):\n        if prices[i] < 0:\n            return i\n    return -1",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 1.0,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 1.121,
+      "prompt_tokens": 700,
+      "completion_tokens": 42,
+      "error": null
+    },
+    {
+      "case_id": "eval-03-missing-return",
+      "instruction_type": "AI-FIX",
+      "raw_completion": "```python\ndef compute_average(total: float, count: int) -> float:\n    if count > 0:\n        return total / count\n    return 0.0\n```",
+      "extracted_code": "def compute_average(total: float, count: int) -> float:\n    if count > 0:\n        return total / count\n    return 0.0",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 0.5,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 1.047,
+      "prompt_tokens": 691,
+      "completion_tokens": 38,
+      "error": null
+    },
+    {
+      "case_id": "eval-04-boundary-conditions",
+      "instruction_type": "AI-FIX",
+      "raw_completion": "```python\ndef get_first_item(items: list):\n    if not items:\n        return None\n    return items[0]\n```",
+      "extracted_code": "def get_first_item(items: list):\n    if not items:\n        return None\n    return items[0]",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 1.0,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 0.794,
+      "prompt_tokens": 668,
+      "completion_tokens": 27,
+      "error": null
+    },
+    {
+      "case_id": "eval-05-existing-body-modification",
+      "instruction_type": "AI-TASK",
+      "raw_completion": "```python\ndef process_number(val: int) -> int:\n    return val * 2 if val > 0 else 0\n```",
+      "extracted_code": "def process_number(val: int) -> int:\n    return val * 2 if val > 0 else 0",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 0.3333,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 0.805,
+      "prompt_tokens": 672,
+      "completion_tokens": 29,
+      "error": null
+    },
+    {
+      "case_id": "eval-06-malformed-empty-output",
+      "instruction_type": "AI-TASK",
+      "raw_completion": "```python\ndef parse_integer_safe(val: str, default: int = 0) -> int:\n    try:\n        return int(val)\n    except ValueError:\n        return default\n```",
+      "extracted_code": "def parse_integer_safe(val: str, default: int = 0) -> int:\n    try:\n        return int(val)\n    except ValueError:\n        return default",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 0.8,
+      "clarification_correct": true,
+      "test_passed": true,
+      "latency_seconds": 0.982,
+      "prompt_tokens": 678,
+      "completion_tokens": 38,
+      "error": null
+    },
+    {
+      "case_id": "eval-07-clarification-request",
+      "instruction_type": "AI-TASK",
+      "raw_completion": "What specific criteria or behavior is required for the authentication logic to be considered better and the user verification flow to be updated?",
+      "extracted_code": "",
+      "instruction_followed": false,
+      "syntax_valid": false,
+      "diff_hygiene_score": 0.0,
+      "clarification_correct": false,
+      "test_passed": null,
+      "latency_seconds": 1.215,
+      "prompt_tokens": 288,
+      "completion_tokens": 24,
+      "error": null
+    },
+    {
+      "case_id": "eval-08-security-sensitive",
+      "instruction_type": "AI-TASK",
+      "raw_completion": "```python\ndef sanitize_filename(filename: str) -> str:\n    # Extract the basename\n    basename = filename.split('/')[-1]\n    \n    # Remove path traversal sequences ('..')\n    while '..' in basename:\n        basename = basename.replace('..', '')\n    \n    # Remove directory separators ('/' and '\\')\n    basename = basename.replace('/', '').replace('\\\\', '')\n    \n    return basename\n```",
+      "extracted_code": "def sanitize_filename(filename: str) -> str:\n    # Extract the basename\n    basename = filename.split('/')[-1]\n    \n    # Remove path traversal sequences ('..')\n    while '..' in basename:\n        basename = basename.replace('..', '')\n    \n    # Remove directory separators ('/' and '\\')\n    basename = basename.replace('/', '').replace('\\\\', '')\n    \n    return basename",
+      "instruction_followed": true,
+      "syntax_valid": true,
+      "diff_hygiene_score": 0.1667,
+      "clarification_correct": true,
+      "test_passed": false,
+      "latency_seconds": 3.578,
+      "prompt_tokens": 683,
+      "completion_tokens": 81,
+      "error": null
+    }
+  ],
+  "evaluation_metadata": {
+    "evaluation_command": "& \"D:\\PROJECTS\\CodePilot AI\\.venv\\Scripts\\python.exe\" \"C:\\Users\\megha\\.gemini\\antigravity-ide\\brain\\04189f01-90db-4fe0-8773-64ef5d39e2ac\\scratch\\run_real_evaluation_v5.py\"",
+    "runtime_configuration": {
+      "provider": "standalone",
+      "model_path": "D:\\PROJECTS\\CodePilot AI\\models\\qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+      "backend": "llama-cpp-python 0.3.36",
+      "python_version": "3.13.12",
+      "n_gpu_layers": 0,
+      "temperature": 0.1,
+      "max_tokens": 1024,
+      "real_inference": true
+    },
+    "timestamps": {
+      "start_iso": "2026-10-23T10:24:42.131155+00:00",
+      "end_iso": "2026-10-23T10:24:54.533633+00:00",
+      "total_execution_time_seconds": 12.4
+    },
+    "routing_decisions": {
+      "eval-01-basic-function": {
+        "route": "code_generation",
+        "reason": "Task specifies concrete function signature, return value, or transformation target",
+        "confidence": 0.95
+      },
+      "eval-02-bug-fixing": {
+        "route": "code_generation",
+        "reason": "Task specifies concrete function signature, return value, or transformation target",
+        "confidence": 0.95
+      },
+      "eval-03-missing-return": {
+        "route": "code_generation",
+        "reason": "Task specifies concrete function signature, return value, or transformation target",
+        "confidence": 0.95
+      },
+      "eval-04-boundary-conditions": {
+        "route": "code_generation",
+        "reason": "Task specifies concrete function signature, return value, or transformation target",
+        "confidence": 0.95
+      },
+      "eval-05-existing-body-modification": {
+        "route": "code_generation",
+        "reason": "Task specifies concrete function signature, return value, or transformation target",
+        "confidence": 0.95
+      },
+      "eval-06-malformed-empty-output": {
+        "route": "code_generation",
+        "reason": "Task specifies concrete function signature, return value, or transformation target",
+        "confidence": 0.95
+      },
+      "eval-07-clarification-request": {
+        "route": "clarification",
+        "reason": "Task metadata explicitly specifies clarification required",
+        "confidence": 1.0
+      },
+      "eval-08-security-sensitive": {
+        "route": "code_generation",
+        "reason": "Task specifies concrete function signature, return value, or transformation target",
+        "confidence": 0.95
+      }
+    },
+    "benchmark_thresholds": {
+      "instruction_following": 0.85,
+      "syntax_validity": 0.95,
+      "diff_hygiene": 0.75,
+      "clarification_accuracy": 0.8,
+      "test_pass_rate": 0.7
+    },
+    "comparison_baseline": {
+      "instruction_following": 0.875,
+      "syntax_validity": 1.0,
+      "diff_hygiene": 0.3192,
+      "clarification_accuracy": 0.875,
+      "test_pass_rate": 0.5714
+    },
+    "comparison_v2": {
+      "instruction_following": 0.875,
+      "syntax_validity": 0.375,
+      "diff_hygiene": 0.56,
+      "clarification_accuracy": 0.875,
+      "test_pass_rate": 0.1429
+    },
+    "comparison_v3": {
+      "instruction_following": 0.875,
+      "syntax_validity": 1.0,
+      "diff_hygiene": 0.607,
+      "clarification_accuracy": 0.875,
+      "test_pass_rate": 0.8571
+    },
+    "comparison_v4": {
+      "instruction_following": 0.125,
+      "syntax_validity": 0.125,
+      "diff_hygiene": 0.0,
+      "clarification_accuracy": 0.125,
+      "test_pass_rate": 0.0
+    },
+    "comparison_v5": {
+      "instruction_following": 0.875,
+      "syntax_validity": 0.875,
+      "diff_hygiene": 0.6,
+      "clarification_accuracy": 0.875,
+      "test_pass_rate": 0.8571
+    },
+    "deltas_vs_v3_pp": {
+      "instruction_following": 0.0,
+      "syntax_validity": -12.5,
+      "diff_hygiene": -0.7,
+      "clarification_accuracy": 0.0,
+      "test_pass_rate": 0.0
+    },
+    "deltas_vs_v4_pp": {
+      "instruction_following": 75.0,
+      "syntax_validity": 75.0,
+      "diff_hygiene": 60.0,
+      "clarification_accuracy": 75.0,
+      "test_pass_rate": 85.71
+    },
+    "verdict": "**Improved but still limited**"
+  }
+}
