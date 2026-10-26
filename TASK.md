@@ -2,16 +2,17 @@
 
 > **Active Project Status, Verified Capabilities, Open Issues, and Engineering Backlog**
 
-**Current Release:** v0.4.1 (Release Ready / Audit Remediation Complete)  
+**Current Release:** v0.4.1 (Command-Driven Refactor Complete)  
 **Overall Status:** Healthy / All Systems Operational  
-**Automated Test Suite:** 391 / 391 Tests Passing (100% Pass Rate across 25 Modules)  
-**Last Verified:** October 23, 2026  
+**Automated Test Suite:** 404 / 404 Tests Passing (100% Pass Rate across 26 Modules)  
+**Last Verified:** October 26, 2026  
 
 ---
 
 ## 1. Current Project Status
 
-CodePilot AI has completed full integration testing and release readiness validation. The system has verified the complete development workflow across isolated repository fixtures:
+CodePilot AI has completed full integration testing, release readiness validation, and the command-driven intelligence refactor. The system has verified the complete development workflow across isolated repository fixtures:
+- Command-Driven Intelligence Refactor: Fully decoupled scanning, analysis, and fix workflows from in-code comments. `codepilot scan` discovers project structure, file types, config files, test suites, skipped files, and AST static defects; `codepilot analyze` operates independently of comments; `codepilot fix` accepts explicit target files and issue descriptions directly, auto-targets clear static findings, prompts cleanly on ambiguous targets, and displays structured investigation panels; `codepilot test` features synchronized framework auto-detection and configurable `--timeout` overrides. Verified with 13 new deterministic tests in `tests/test_command_driven.py` (404/404 passing tests). Verdict: IMPLEMENTED & VERIFIED.
 - Project root detection, status inspection, architecture analysis, and instruction scanning.
 - Context assembly, prompt construction, and local model explanation.
 - Two-stage patch generation, diff staging, unified diff review, and explicit approval gating.
@@ -58,6 +59,7 @@ The planned development lifecycle is complete. The codebase is stabilized, fully
 | **Safe Test Execution & Fix** | Safe test discovery, preview mode (`codepilot test --preview`), concurrency locking (`.codepilot/test.lock`), 64 KB output capture, shell injection prevention, quoted Windows interpreter execution, and live-model test repair staging (`codepilot test --approved --fix`) | `tests/test_test.py`, `tests/test_phase9_security_recovery.py` |
 | **Security & File Ownership** | Authoritative project-root resolution (`resolve_project_root`), 5-tier ownership classification (`classify_file_ownership`), 6-operation permission checks (`check_file_permission`), and path traversal guards (`validate_target_path`) | `tests/test_ownership_root.py`, `tests/test_phase9_security_recovery.py` |
 | **Dataset & Evaluation Subsystems** | JSONL dataset schema, leakage and credential validator, stratified splitter, 8-category benchmark runner with source context forwarding, empty-extraction denominator fix, diff hygiene analysis, and restricted in-memory validation test execution | `tests/test_dataset.py`, `tests/test_evaluation.py`, `tests/test_cli_evaluate.py` |
+| **Command-Driven Intelligence** | Decoupled terminal-driven workflow (`codepilot fix`), explicit target and issue parameters, comment-free scanning and architecture analysis, AST static defect detection, ambiguous target resolution, test timeout override, and preview diff safety | `tests/test_command_driven.py` |
 | **End-to-End Workflow Integration** | Complete 13-stage lifecycle validation, stale patch rejection, path traversal rejection, protected file preservation, and test runner locking across isolated test repositories | `tests/test_phase10_integration.py` |
 | **Phase 11 GGUF Patch Integration** | Redundant function signature unwrapping (`unwrap_nested_function_body`), prompt replacement scope rule, enclosing function symbol grounding (`find_enclosing_function`), and standalone GGUF preview pipeline integration | `tests/test_phase11_gguf_integration.py` |
 | **Phase 12 Model Quality & Optimization** | Robust closed/unclosed markdown fence extraction (`extract_code_from_completion`), conversational preamble filtering (`_is_probable_code`), code-first prompt structuring, and 8-category deterministic evaluation benchmark | `tests/test_evaluation.py` |

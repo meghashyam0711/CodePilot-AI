@@ -5,7 +5,15 @@ All notable changes to the CodePilot AI project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.1] - 2026-10-23
+## [0.4.1] - 2026-10-26
+
+### Added
+- **Command-Driven Intelligence Refactor:** Decoupled CodePilot AI from mandatory in-code instruction comments (`# AI-FIX:`, `# AI-TASK:`, etc.), establishing terminal-driven workflows as the primary interface while preserving in-code comments as optional task hints:
+  - **Comment-Free Repository Scanner (`scanner.py`):** Extended `ScanResult` to inventory discovered source files, file extension distributions, configuration files, test directories, skipped files with exclusion reasons, and AST-based static defect findings (syntax errors, empty files) without requiring comments.
+  - **Independent Architecture Analysis (`analyze_cmd` in `cli.py`):** Analyzes project architecture, entry points, dependency graphs, and static defects completely independently of comments.
+  - **Command-Driven Fix Targeting (`fixer.py`, `cli.py`):** Enabled `codepilot fix` to accept explicit target files and issue descriptions directly (`codepilot fix calc.py --issue "handle zero div"`), auto-target clear static findings when no target is passed, prompt cleanly when findings are ambiguous, display an **Investigation & Proposed Fix** panel, and generate candidate diff previews without touching disk.
+  - **Synchronized Test Runner Discovery & Timeouts (`tester.py`, `cli.py`):** Aligned test framework detection across `discover_project_tests()` and `detect_safe_test_command()` for pytest, npm, cargo, and go suites, and added configurable `--timeout` execution override.
+  - **Command-Driven Test Suite (`tests/test_command_driven.py`):** Added 13 deterministic automated tests verifying comment-free scanning, JSON outputs, static finding detection, independent analysis, explicit/ad-hoc fixing, single-finding auto-selection, ambiguous target prompting, diff preview safety, approval enforcement, rollback, and timeout configuration. Total test suite expanded to **404 passing tests across 26 modules** (100% pass rate).
 
 ### Fixed
 - **Pre-Apply Snapshot Relative Path Preservation (Phase 14.1 / TASK-AUD-01):** Fixed `create_patch_backup()` in `src/codepilot/core/recovery.py` to mirror original relative directory paths under `.codepilot/backups/<patch_id>/` and added incremental collision counter, preventing backup overwrites when multi-file patches touch files with identical basenames across distinct subdirectories. Maintained full backward compatibility for `rollback_patch()`.

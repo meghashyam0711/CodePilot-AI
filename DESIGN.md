@@ -30,20 +30,24 @@
 | `status` | `codepilot status` | Rich status card showing Git branch, engine status, file counts | JSON status summary object |
 | `doctor` | `codepilot doctor` | Diagnostic checklist (Python, Git, Security Enclaves, Model Runtime) | JSON array of diagnostic checks |
 | `init` | `codepilot init` | Confirmation panel with configuration path | N/A (creates `.codepilot.toml`) |
-| `scan` | `codepilot scan` | 5-column table of comments + count breakdown by type | JSON array of raw comments |
+| `scan` | `codepilot scan` | Project breakdown (extensions, configs, tests, skipped), static defects + optional comment hints | JSON scan result object |
 | `tasks` | `codepilot tasks` | Table with Task ID, Type, Location, Target Symbol, Description | JSON array of `InstructionTask` |
-| `analyze` | `codepilot analyze` | Metrics, Language distribution, Entry points, Module breakdown | JSON `ProjectArchitectureReport` |
-| `plan` | `codepilot plan` | Plan ID, Task breakdown, Risk levels, Scope estimation (optional `--llm`) | JSON `ImplementationPlan` |
+| `analyze` | `codepilot analyze` | Metrics, Language distribution, Entry points, Module breakdown, Static defects | JSON `ProjectArchitectureReport` |
+| `plan` | `codepilot plan` | Plan ID, Task breakdown, Risk levels, Scope estimation (from comments or static findings) | JSON `ImplementationPlan` |
 | `explain` | `codepilot explain [ID]` | Model explanation, proposed approach, and inference metrics | JSON object (task, explanation, context) |
-| `fix --preview` | `codepilot fix --preview [-t ID]` | Colored unified Git diff + staged in `.codepilot/patches/pending_patch.json` | JSON patch bundle object |
+| `fix` | `codepilot fix [target] [--issue] [--preview]` | Investigation explanation + unified Git diff staged in `.codepilot/patches/pending_patch.json` | JSON patch bundle object |
 | `diff` | `codepilot diff` | Syntax-highlighted unified diff for inspection without file writes | JSON pending patch inspection object |
 | `apply --approved` | `codepilot apply --approved` | Pre-apply backup snapshot + SHA256 validated modification | JSON application result object |
 | `rollback` | `codepilot rollback [--list]` | Restores pre-apply file snapshots without destructive Git commands | JSON rollback status object |
-| `test` | `codepilot test [--preview] [--fix]` | Safe test discovery, concurrency locking, 64KB bounded capture, `--fix` proposal | JSON `TestRunResult` object |
+| `test` | `codepilot test [--preview] [--approved] [--timeout] [--fix]` | Safe test discovery, concurrency locking, 64KB bounded capture, timeout controls, `--fix` proposal | JSON `TestRunResult` object |
+| `evaluate` | `codepilot evaluate [--provider] [--model] [--strict]` | 8-category benchmark scorecard, diff hygiene, syntax validity, in-memory validation test execution | JSON / Markdown evaluation report |
 
 ---
 
-## 2. AI Instruction Comment Syntax & Grammar
+## 2. AI Instruction Comment Syntax & Grammar (Optional Task Hints)
+
+> [!NOTE]
+> In-code instruction comments are **optional task hints**, not prerequisites. Developers can perform all scanning, analysis, and fix workflows directly via terminal commands without modifying source files.
 
 ### 2.1 Supported Instruction Types
 CodePilot AI recognizes 5 canonical instruction types:

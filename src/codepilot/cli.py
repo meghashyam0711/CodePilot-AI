@@ -14,6 +14,8 @@ Provides the CLI entry points for:
 - codepilot evaluate
 """
 
+import ast
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -66,6 +68,7 @@ from codepilot.core.patcher import apply_approved_patch
 from codepilot.core.planner import generate_plan, load_plan, save_plan
 from codepilot.core.recovery import list_backups, rollback_patch
 from codepilot.core.scanner import (
+    SOURCE_EXTENSIONS,
     load_scan_result,
     save_scan_result,
     scan_repository,
@@ -458,29 +461,76 @@ def scan_cmd(
             sys.stdout.flush()
             return
 
-        table = Table(
-            title=f"{APP_NAME} - Discovered AI Instruction Comments",
+        # Render Project Overview Table
+        overview_table = Table(
+            title=f"{APP_NAME} - Project Scan Overview",
             show_header=True,
             header_style="bold cyan",
         )
-        table.add_column("ID", style="dim", width=12)
-        table.add_column("File", style="cyan", min_width=25)
-        table.add_column("Line", style="bold yellow", width=6)
-        table.add_column("Type", style="bold magenta", width=10)
-        table.add_column("Instruction Prompt", min_width=40)
+        overview_table.add_column("Scan Property", style="cyan", width=25)
+        overview_table.add_column("Details", style="bold white", min_width=30)
 
-        for inst in scan_result.instructions:
-            table.add_row(
-                inst.id,
-                escape(inst.file_path),
-                str(inst.line_number),
-                inst.instruction_type,
-                escape(inst.prompt),
+        overview_table.add_row("Scanned Source Files", str(scan_result.scanned_files_count))
+        if scan_result.file_types:
+            types_str = ", ".join(f"{ext} ({cnt})" for ext, cnt in scan_result.file_types.items())
+            overview_table.add_row("Supported File Types", types_str)
+        if scan_result.config_files:
+            overview_table.add_row("Config Files Discovered", ", ".join(scan_result.config_files[:5]))
+        if scan_result.test_directories:
+            overview_table.add_row("Test Directories", ", ".join(scan_result.test_directories))
+        if scan_result.skipped_files:
+            overview_table.add_row("Skipped / Excluded Files", f"{len(scan_result.skipped_files)} file(s)")
+
+        console.print(overview_table)
+
+        # Render static analysis findings if detected
+        if scan_result.static_findings:
+            findings_table = Table(
+                title=f"{APP_NAME} - Static Code Health & Defect Observations",
+                show_header=True,
+                header_style="bold red",
             )
+            findings_table.add_column("File", style="cyan", min_width=25)
+            findings_table.add_column("Line", style="bold yellow", width=6)
+            findings_table.add_column("Type", style="bold magenta", width=14)
+            findings_table.add_column("Severity", width=10)
+            findings_table.add_column("Finding Details", min_width=35)
 
-        console.print(table)
+            for finding in scan_result.static_findings:
+                sev = finding.get("severity", "warning")
+                sev_color = "red" if sev == "error" else "yellow"
+                findings_table.add_row(
+                    escape(str(finding.get("file", "-"))),
+                    str(finding.get("line", 1)),
+                    escape(str(finding.get("type", "static_issue"))),
+                    f"[{sev_color}]{sev.upper()}[/{sev_color}]",
+                    escape(str(finding.get("message", ""))),
+                )
+            console.print(findings_table)
 
+        # Render discovered AI comments (optional task hints)
         if scan_result.instructions:
+            table = Table(
+                title=f"{APP_NAME} - Discovered AI Instruction Comments",
+                show_header=True,
+                header_style="bold cyan",
+            )
+            table.add_column("ID", style="dim", width=12)
+            table.add_column("File", style="cyan", min_width=25)
+            table.add_column("Line", style="bold yellow", width=6)
+            table.add_column("Type", style="bold magenta", width=10)
+            table.add_column("Instruction Prompt", min_width=40)
+
+            for inst in scan_result.instructions:
+                table.add_row(
+                    inst.id,
+                    escape(inst.file_path),
+                    str(inst.line_number),
+                    inst.instruction_type,
+                    escape(inst.prompt),
+                )
+            console.print(table)
+
             counts_str = ""
             if scan_result.counts_by_type:
                 counts_str = "\n[bold cyan]Counts:[/bold cyan] " + " | ".join(
@@ -490,6 +540,7 @@ def scan_cmd(
                 Panel(
                     f"[bold green]Discovered {len(scan_result.instructions)} AI instruction comment(s)[/bold green] "
                     f"across {scan_result.scanned_files_count} scanned files.{counts_str}\n"
+                    "Note: In-code instruction comments are optional task hints.\n"
                     "Next step: Run [bold cyan]codepilot tasks[/bold cyan] to inspect symbol mapping,\n"
                     "or run [bold cyan]codepilot plan[/bold cyan] to generate an implementation plan.",
                     title="[bold green]Scan Complete[/bold green]",
@@ -497,20 +548,17 @@ def scan_cmd(
                 )
             )
         else:
-            sample_comments = (
-                "  # AI-FIX: handle division by zero\n"
-                "  # AI-TASK: implement user login function\n"
-                "  # AI-REFACTOR: optimize database query\n"
-                "  # AI-TEST: add unit test\n"
-                "  # AI-DOCS: document public methods"
-            )
             console.print(
                 Panel(
                     f"Scanned {scan_result.scanned_files_count} files in '{directory}'.\n"
-                    f"No AI instruction comments found.\n\n"
-                    f"Add comments such as:\n[dim]{escape(sample_comments)}[/dim]",
-                    title="[bold yellow]No Instructions Found[/bold yellow]",
-                    border_style="yellow",
+                    "No AI instruction comments found (special comments are optional).\n\n"
+                    "You can run command-driven workflows directly:\n"
+                    "  • [cyan]codepilot analyze[/cyan]              Inspect architecture, dependencies & symbols\n"
+                    "  • [cyan]codepilot fix <file> --issue <msg>[/cyan]  Investigate and preview fixes\n"
+                    "  • [cyan]codepilot test --preview[/cyan]          Discover and review test suite\n\n"
+                    "[dim]Optional comment hints: # AI-FIX: ..., # AI-TASK: ...[/dim]",
+                    title="[bold green]Scan Complete — Ready for Commands[/bold green]",
+                    border_style="green",
                 )
             )
 
@@ -1131,7 +1179,30 @@ def analyze_cmd(
                     rel_table.add_row(escape(src), escape(", ".join(tgts)))
                 console.print(rel_table)
 
-        # 6. Save Notice Panel
+        # 6. Code Quality Concerns & Static Analysis Observations
+        static_concerns = []
+        for mod in report.modules:
+            if mod.parse_error:
+                static_concerns.append((mod.file_path, "Parse/Syntax Error", mod.parse_error))
+        for w in report.warnings:
+            if not any(w in sc[2] for sc in static_concerns):
+                static_concerns.append(("-", "Observation / Exclusion", w))
+
+        if static_concerns:
+            concerns_table = Table(
+                title=f"{APP_NAME} - Code Quality Concerns & Static Analysis Observations",
+                show_header=True,
+                header_style="bold red",
+            )
+            concerns_table.add_column("Location / File", style="cyan", min_width=25)
+            concerns_table.add_column("Category", style="yellow", width=25)
+            concerns_table.add_column("Details", min_width=40)
+
+            for loc, cat, det in static_concerns:
+                concerns_table.add_row(escape(loc), escape(cat), escape(det))
+            console.print(concerns_table)
+
+        # 7. Save Notice Panel
         if output:
             console.print(
                 Panel(
@@ -1314,6 +1385,16 @@ def plan_cmd(
     help="Generate proposed code changes and display a Git diff without modifying source files.",
 )
 def fix_cmd(
+    target: Optional[str] = typer.Argument(
+        None,
+        help="Target file path, issue description, or task ID to fix.",
+    ),
+    issue: Optional[str] = typer.Option(
+        None,
+        "--issue",
+        "-i",
+        help="Explicit issue or repair description.",
+    ),
     preview: bool = typer.Option(
         True,
         "--preview",
@@ -1353,16 +1434,253 @@ def fix_cmd(
     """Generate proposed code modifications and preview Git diffs safely."""
     try:
         core_app = CodePilotApp(project_root=directory)
+        root = directory.resolve()
+
         plan_cache = directory / ".codepilot" / "plan.json"
         plan = load_plan(plan_cache)
+
+        adhoc_task: Optional[InstructionTask] = None
+        investigation_explanation: Optional[Dict[str, Any]] = None
+
+        # 1. Determine if an explicit task_id is supplied
+        chosen_task_id = task_id
+        if not chosen_task_id and target and plan and any(t.task_id == target.strip() or target.strip() in t.task_id for t in plan.tasks):
+            chosen_task_id = target.strip()
+
+        # 2. If no existing task ID, handle explicit target file or issue description
+        if not chosen_task_id and (target or issue):
+            target_str = (target or "").strip()
+            issue_str = (issue or "").strip()
+
+            target_file_rel = None
+            target_line = 1
+            prompt_desc = issue_str
+
+            # Check if target_str points to an existing file in the project
+            cand_path = root / target_str if target_str else None
+            if cand_path and cand_path.is_file():
+                try:
+                    target_file_rel = str(cand_path.relative_to(root)).replace("\\", "/")
+                except ValueError:
+                    target_file_rel = target_str
+                if not prompt_desc:
+                    prompt_desc = f"Fix code issues and improve implementation in '{target_file_rel}'"
+            elif target_str:
+                # target_str is an issue description
+                if not prompt_desc:
+                    prompt_desc = target_str
+                # Search if prompt_desc mentions an existing source file
+                for sf in root.rglob("*"):
+                    if sf.is_file() and sf.suffix.lower() in SOURCE_EXTENSIONS:
+                        rel = str(sf.relative_to(root)).replace("\\", "/")
+                        if sf.name in prompt_desc or rel in prompt_desc:
+                            target_file_rel = rel
+                            break
+
+            # If still no file identified, pick first finding or first discovered file
+            if not target_file_rel:
+                scan_res = scan_repository(root, core_app.config)
+                if scan_res.static_findings:
+                    target_file_rel = scan_res.static_findings[0]["file"]
+                    target_line = scan_res.static_findings[0].get("line", 1)
+                elif scan_res.discovered_files:
+                    target_file_rel = scan_res.discovered_files[0]
+                else:
+                    raise FixError(f"No target source file could be resolved for '{target_str or prompt_desc}'.")
+
+            # Check for enclosed function or symbol in target file
+            target_symbol = None
+            full_target_file = root / target_file_rel
+            if full_target_file.is_file():
+                try:
+                    f_content = full_target_file.read_text(encoding="utf-8", errors="replace")
+                    tree = ast.parse(f_content)
+                    for node in ast.walk(tree):
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            if node.name.lower() in prompt_desc.lower() or not target_symbol:
+                                target_symbol = node.name
+                                if node.body:
+                                    target_line = node.body[0].lineno
+                                else:
+                                    target_line = node.lineno
+                except SyntaxError as syn:
+                    target_line = getattr(syn, "lineno", 1) or 1
+                except Exception:
+                    pass
+
+            adhoc_task = InstructionTask(
+                id=f"cmd-fix-{hashlib.sha256(f'{target_file_rel}:{prompt_desc}'.encode()).hexdigest()[:8]}",
+                file_path=target_file_rel,
+                line_number=target_line,
+                instruction_type="AI-FIX",
+                description=prompt_desc,
+                target_symbol=target_symbol,
+                target_symbol_type="function" if target_symbol else None,
+            )
+
+            investigation_explanation = {
+                "target_file": target_file_rel,
+                "line": target_line,
+                "suspected_error": prompt_desc,
+                "evidence": f"File: {target_file_rel}:{target_line}" + (f" (symbol '{target_symbol}')" if target_symbol else ""),
+                "likely_cause": f"Issue or requirement specified via CLI command: '{prompt_desc}'.",
+                "proposed_correction": f"Formulate and stage candidate code patch in '{target_file_rel}'.",
+            }
+
+        # 3. If no target specified at all: inspect existing plan, comments, or static findings
+        elif not chosen_task_id:
+            if plan and plan.tasks:
+                # Existing plan with tasks exists; will be processed directly
+                pass
+            else:
+                scan_res = scan_repository(root, core_app.config)
+                if scan_res.instructions:
+                    # Comments exist; will be handled by standard plan generation
+                    pass
+                elif scan_res.static_findings:
+                    findings = scan_res.static_findings
+                    if len(findings) == 1:
+                        # Exactly one finding: target is clear
+                        f = findings[0]
+                        target_file_rel = f["file"]
+                        target_line = f.get("line", 1)
+                        f_msg = f.get("message", "Static defect detected")
+                        adhoc_task = InstructionTask(
+                            id="finding-fix-1",
+                            file_path=target_file_rel,
+                            line_number=target_line,
+                            instruction_type="AI-FIX",
+                            description=f"Fix static finding: {f_msg}",
+                            target_symbol=None,
+                            target_symbol_type=None,
+                        )
+                        investigation_explanation = {
+                            "target_file": target_file_rel,
+                            "line": target_line,
+                            "suspected_error": f.get("type", "static_defect"),
+                            "evidence": f"{target_file_rel}:{target_line} - {f_msg}",
+                            "likely_cause": f"Static analysis identified {f.get('type')}: {f_msg}",
+                            "proposed_correction": f"Correct syntax/implementation in '{target_file_rel}' at line {target_line}.",
+                        }
+                    else:
+                        # Target is ambiguous: multiple findings exist
+                        table = Table(
+                            title=f"{APP_NAME} - Available Static Findings (Target is Ambiguous)",
+                            show_header=True,
+                            header_style="bold yellow",
+                        )
+                        table.add_column("#", style="bold", width=4)
+                        table.add_column("File", style="cyan", min_width=25)
+                        table.add_column("Line", style="yellow", width=6)
+                        table.add_column("Severity", width=10)
+                        table.add_column("Finding Details", min_width=35)
+
+                        for idx, f in enumerate(findings, start=1):
+                            table.add_row(
+                                str(idx),
+                                escape(f.get("file", "")),
+                                str(f.get("line", 1)),
+                                f.get("severity", "warning").upper(),
+                                escape(f.get("message", "")),
+                            )
+
+                        if json_output:
+                            sys.stdout.write(json.dumps({
+                                "ambiguous": True,
+                                "message": "Multiple findings available. Specify target file or issue to fix.",
+                                "findings": findings,
+                            }, indent=2) + "\n")
+                            return
+
+                        console.print(table)
+                        chosen_idx = None
+                        if sys.stdin.isatty():
+                            try:
+                                val = typer.prompt(f"Select a finding number to fix (1-{len(findings)}) or 'q' to abort", default="1")
+                                if val.strip().lower() not in ("q", "quit", "exit"):
+                                    chosen_idx = int(val.strip()) - 1
+                            except Exception:
+                                pass
+
+                        if chosen_idx is not None and 0 <= chosen_idx < len(findings):
+                            f = findings[chosen_idx]
+                            target_file_rel = f["file"]
+                            target_line = f.get("line", 1)
+                            f_msg = f.get("message", "Static defect detected")
+                            adhoc_task = InstructionTask(
+                                id=f"finding-fix-{chosen_idx + 1}",
+                                file_path=target_file_rel,
+                                line_number=target_line,
+                                instruction_type="AI-FIX",
+                                description=f"Fix static finding: {f_msg}",
+                                target_symbol=None,
+                                target_symbol_type=None,
+                            )
+                            investigation_explanation = {
+                                "target_file": target_file_rel,
+                                "line": target_line,
+                                "suspected_error": f.get("type", "static_defect"),
+                                "evidence": f"{target_file_rel}:{target_line} - {f_msg}",
+                                "likely_cause": f"Static analysis identified {f.get('type')}: {f_msg}",
+                                "proposed_correction": f"Correct syntax/implementation in '{target_file_rel}' at line {target_line}.",
+                            }
+                        else:
+                            console.print(
+                                Panel(
+                                    "Multiple findings detected in repository. Please specify the target file or issue:\n"
+                                    "  [bold cyan]codepilot fix <file_path> --issue '<description>'[/bold cyan]\n"
+                                    "Example: [cyan]codepilot fix src/calculator.py --issue 'fix division by zero'[/cyan]",
+                                    title="[bold yellow]Target Selection Required[/bold yellow]",
+                                    border_style="yellow",
+                                )
+                            )
+                            return
+                else:
+                    # No comments and no static findings
+                    if json_output:
+                        sys.stdout.write(json.dumps({
+                            "status": "no_targets",
+                            "message": "No actionable findings or instruction tasks detected in the project.",
+                        }, indent=2) + "\n")
+                        return
+                    console.print(
+                        Panel(
+                            "No actionable static findings or instruction comments detected in the project.\n\n"
+                            "To fix a specific file or issue, provide the target directly:\n"
+                            "  [bold cyan]codepilot fix <file_path> --issue '<description>'[/bold cyan]\n"
+                            "Example: [cyan]codepilot fix src/utils.py --issue 'handle None values safely'[/cyan]\n\n"
+                            "Other available commands:\n"
+                            "  • Run full static analysis: [cyan]codepilot analyze[/cyan]\n"
+                            "  • Run project test suite:    [cyan]codepilot test --preview[/cyan]",
+                            title="[bold yellow]No Targets Found[/bold yellow]",
+                            border_style="yellow",
+                        )
+                    )
+                    return
+
+        # Display investigation explanation if available
+        if investigation_explanation and not json_output:
+            console.print(
+                Panel(
+                    f"[bold white]Target:[/bold white] [bold cyan]{escape(investigation_explanation['target_file'])}:{investigation_explanation['line']}[/bold cyan]\n"
+                    f"[bold white]Suspected Problem:[/bold white] [yellow]{escape(investigation_explanation['suspected_error'])}[/yellow]\n\n"
+                    f"[bold white]Evidence:[/bold white]\n{escape(investigation_explanation['evidence'])}\n\n"
+                    f"[bold white]Likely Cause:[/bold white] {escape(investigation_explanation['likely_cause'])}\n\n"
+                    f"[bold white]Proposed Correction:[/bold white] {escape(investigation_explanation['proposed_correction'])}\n\n"
+                    "[dim]Generating candidate unified diff preview...[/dim]",
+                    title="[bold cyan]Investigation & Proposed Fix[/bold cyan]",
+                    border_style="cyan",
+                )
+            )
 
         patch_bundle = generate_preview_patch(
             directory,
             core_app.config,
-            plan=plan,
+            plan=plan if not adhoc_task else None,
             override_provider=provider,
             override_model=model,
-            target_task_id=task_id,
+            target_task_id=chosen_task_id,
+            adhoc_task=adhoc_task,
         )
 
         if json_output:
@@ -1375,7 +1693,7 @@ def fix_cmd(
                 console.print(
                     Panel(
                         f"[bold cyan]Clarification Required:[/bold cyan]\n\n{patch_bundle.clarification_question}\n\n"
-                        "[dim]The instruction was ambiguous or incomplete. Please clarify the requirements in the code comment and re-run.[/dim]",
+                        "[dim]The instruction was ambiguous or incomplete. Please clarify the requirements and re-run.[/dim]",
                         title="[bold yellow]Clarification Request[/bold yellow]",
                         border_style="yellow",
                     )
@@ -1384,7 +1702,7 @@ def fix_cmd(
             console.print(
                 Panel(
                     "No pending code modifications generated.\n"
-                    "Ensure instruction comments exist via 'codepilot scan'.",
+                    "Ensure target file and issue description are valid.",
                     title="[bold yellow]No Modifications Proposed[/bold yellow]",
                     border_style="yellow",
                 )
@@ -1754,6 +2072,20 @@ def test_cmd(
                 sys.stdout.write(json.dumps(discovery.to_dict(), indent=2) + "\n")
                 return
 
+            if not discovery.is_supported:
+                console.print(
+                    Panel(
+                        f"[bold yellow]No Test Framework or Tests Detected[/bold yellow]\n\n"
+                        f"Could not automatically detect a test framework in '{directory.resolve()}'.\n"
+                        "To preview or execute tests, please configure 'test_command' in '.codepilot.toml'\n"
+                        "or supply an explicit test command via '--command'.\n\n"
+                        "Example: [cyan]codepilot test --command \"pytest\" --preview[/cyan]",
+                        title="[bold yellow]Test Framework Not Found[/bold yellow]",
+                        border_style="yellow",
+                    )
+                )
+                return
+
             console.print(
                 Panel(
                     f"[bold white]Detected Framework:[/bold white] [bold cyan]{discovery.framework}[/bold cyan]\n"
@@ -1786,6 +2118,27 @@ def test_cmd(
         # 2. Approval Requirement Check: If auto-detecting tests (no explicit --command) and not approved
         if not approved and not command:
             discovery = discover_project_tests(directory, core_app.config)
+            if not discovery.is_supported:
+                err_msg = (
+                    f"Could not detect test framework in project root '{directory.resolve()}'.\n"
+                    "Configure 'test_command' in '.codepilot.toml' or supply a command via '--command'."
+                )
+                if json_output:
+                    out_data = discovery.to_dict()
+                    out_data["error"] = err_msg
+                    sys.stdout.write(json.dumps(out_data, indent=2) + "\n")
+                    raise typer.Exit(code=1)
+
+                err_console.print(
+                    Panel(
+                        f"[bold red]Test Detection Error[/bold red]\n\n{err_msg}\n\n"
+                        "Example: [cyan]codepilot test --command \"pytest\" --approved[/cyan]",
+                        title="[bold red]Test Framework Not Found[/bold red]",
+                        border_style="red",
+                    )
+                )
+                raise typer.Exit(code=1)
+
             if json_output:
                 out_data = discovery.to_dict()
                 out_data["requires_approval"] = True

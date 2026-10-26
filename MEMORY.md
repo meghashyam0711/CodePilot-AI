@@ -174,6 +174,14 @@
 - **Decision:** In `src/codepilot/core/context/engine.py`, `DEFAULT_SYSTEM_OVERHEAD_TOKENS = 400` is defined and incorporated into `_estimate_tokens(..., include_overhead=True)`. Context budget evaluation (`estimated_tokens > token_budget`) reserves this overhead buffer before assembling auxiliary related code context.
 - **Rationale:** Prevents context window overflows at inference time by ensuring the context engine reserves adequate token budget for system instructions, instruction prompts, and `<untrusted_repository_context>` wrapper delimiters.
 
+### DEC-042: Command-Driven Intelligence and In-Code Comment Decoupling
+- **Decision:** Decoupled `codepilot scan`, `analyze`, and `fix` workflows from in-code comments. `codepilot scan` discovers project structure, file types, config files, test suites, skipped files, and AST static defects; `codepilot analyze` operates independently of comments; `codepilot fix` accepts explicit target files and issue descriptions directly (`codepilot fix calculator.py --issue "handle division by zero"`), auto-targets single clear static findings, prompts cleanly on ambiguous targets, and displays structured investigation panels.
+- **Rationale:** Requiring users to manually edit source code to insert special comments (`# AI-FIX:`) before using an AI assistant creates friction, pollutes source files, and impedes clean terminal workflows. In-code comments are retained as optional task hints.
+
+### DEC-043: Preservation of Function Definition Signatures in Rule-Based and Mock Fixes
+- **Decision:** In `generate_mock_file_fix()` and symbol target line resolution, when targeting a function definition, CodePilot targets the first statement of the function body (`node.body[0].lineno`) or preserves the `def`/`async def` header and inserts into the body with correct indentation rather than overwriting the header.
+- **Rationale:** Overwriting a function header with replacement body statements destroys the function signature, breaks indentation of succeeding lines, and produces syntax errors (`IndentationError: unexpected indent`). Preserving headers ensures generated fixes remain structurally and syntactically valid Python code.
+
 ---
 
 ## 2. Confirmed Technical Constraints
@@ -289,6 +297,10 @@
 ### LESSON-024: Symbol Resolution Divergence Between Comment Parsing and Docstring Extraction
 - **Symptom:** During Phase 15 regression testing of nested class methods (`class Outer: class Inner: def compute:`), `PlanTask` forwarded `target_symbol = "Outer"` because `SymbolResolver` only checked the immediate class body. Downstream, `extract_documentation_content` expected qualified method paths (`Outer.Inner.compute`), resulting in target mismatch.
 - **Remedy:** Synchronize symbol resolution across all subsystems: make `SymbolResolver` traverse nested classes recursively to construct the fully qualified symbol name (`Outer.Inner.compute`), aligning it with `_find_ast_symbol_span` and `extract_documentation_content`.
+
+### LESSON-025: Target Line Resolution Must Anchor to Function Bodies to Avoid Indentation Collisions
+- **Symptom:** When a user targets an entire function via `codepilot fix <file> --issue "<issue>"`, AST symbol resolution initially assigned `target_line = node.lineno` (the `def` statement header line). Substituting replacement code onto line 1 destroyed the function header, leaving the original body indented and triggering `IndentationError: unexpected indent`.
+- **Remedy:** When an enclosing function symbol is detected, anchor `target_line` to the first statement of the body (`node.body[0].lineno`). In addition, guard `generate_mock_file_fix()` so that if `target_line` begins with `def ` or `async def `, it automatically recurses into the body or indents the insertion under the header.
 
 ---
 

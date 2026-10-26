@@ -2,7 +2,7 @@
 
 > **Architectural Specification and Component Design for Local AI-Driven Code Modification**
 
-CodePilot AI is structured as a modular, layered CLI application designed to analyze unfamiliar Git repositories, parse inline AI instruction comments, construct bounded model contexts, generate unified Git diffs, apply validated patches under explicit developer approval, safely execute tests with concurrency locking, recover non-destructively via pre-apply backup snapshots, and provide standalone local GGUF model execution without mandatory cloud services or external daemons.
+CodePilot AI is structured as a modular, layered CLI application designed to analyze unfamiliar Git repositories via command-driven terminal workflows (with optional in-code instruction comment hints), identify static code health concerns, construct bounded model contexts, generate candidate unified Git diffs without modifying files on disk, apply validated patches under explicit developer approval, safely execute tests with concurrency locking and configurable timeouts, recover non-destructively via pre-apply backup snapshots, and provide standalone local GGUF model execution without mandatory cloud services or external daemons.
 
 ---
 
@@ -122,14 +122,16 @@ flowchart TD
 - **Cascading Precedence:** Hardcoded safe defaults $\rightarrow$ `.codepilot.toml` $\rightarrow$ Environment variables (`CODEPILOT_*`) $\rightarrow$ CLI options.
 - **Secret Masking:** Formatter automatically redacts API keys, Bearer tokens, private keys, and passwords before records reach terminal or file outputs.
 
-### 2.3 Repository Discovery & Static Analysis (`src/codepilot/core/analyzer/`)
+### 2.3 Repository Discovery & Static Analysis (`src/codepilot/core/analyzer/` & `src/codepilot/core/scanner.py`)
 - **Discovery Engine (`discovery.py`):** Traverses repositories honoring `.gitignore`, ignoring build caches, virtual environments, and binary files.
+- **Project Structure & Health Scanner (`scanner.py`):** In addition to optional comment scanning, discovers file extension distributions, configuration files, test directories, skipped files with exclusion reasons, and performs AST-based static defect detection (syntax errors, empty files) without requiring comments.
 - **AST Symbol Extractors (`extractors/python.py`, `extractors/generic.py`):** Extracts modules, imports, classes, methods, functions, docstrings, and decorators using Python's standard `ast` module, falling back to regex patterns for non-Python sources.
 - **Entry Point Detector (`entry_points.py`):** Scores and ranks executable scripts, CLI dispatchers, and WSGI/ASGI application instances.
 - **Relationship Mapper (`relationships.py`):** Resolves intra-project import graphs and class inheritance hierarchies.
 - **Context Builder (`context_builder.py`):** Formats token-budgeted prompt context for consumption by local models.
 
 ### 2.4 AI Instruction Comment Engine (`src/codepilot/core/parser/`)
+- **Optional Task Hints:** Special instruction comments (`# AI-FIX:`, `# AI-TASK:`, `# AI-REFACTOR:`, `# AI-TEST:`, `# AI-DOCS:`) provide optional in-code task hints, but are completely optional. Ordinary scanning, analysis, and fix workflows operate independently of comments.
 - **Multi-Language Adapters (`adapters.py`):** Extensible adapter architecture supporting Python (`#`), C/C++/Java/JS/TS/Go/Rust (`//`, `/* ... */`), HTML/XML (`<!-- ... -->`), and SQL (`--`).
 - **Token-Level Parser (`comment_parser.py`):** Utilizes Python standard `tokenize` on source bytes. Guarantees that string literals and docstrings containing instruction keywords are never treated as comments.
 - **AST Symbol Resolver (`symbol_resolver.py`):** Resolves instructions to their preceding definitions ($\le 2$ lines, accounting for decorators) or enclosing blocks, associating target symbols (`calculate_total`, `Client.connect`) with task records.
@@ -149,6 +151,7 @@ flowchart TD
 - **Client Factory (`factory.py`):** Dynamic runtime instantiation based on configuration or CLI overrides (`--provider`, `--model`).
 
 ### 2.7 Patch Generation & Reversible Recovery (`src/codepilot/core/fixer.py`, `patcher.py`, `recovery.py`)
+- **Command-Driven & Ad-Hoc Targeting:** `codepilot fix` accepts explicit target files and issue descriptions directly (`codepilot fix calc.py --issue "handle zero div"`), auto-targets single clear static findings, or prompts clearly when findings are ambiguous. Displays a structured **Investigation & Proposed Fix** panel.
 - **Two-Stage Code Modification:**
   - *Stage 1 (Preview):* `codepilot fix --preview` generates unified diffs staged in `.codepilot/patches/pending_patch.json` with target file SHA256 checksums. Source files remain 100% untouched.
   - *Stage 2 (Approved Apply):* `codepilot apply --approved` validates that current target file checksums match generation-time hashes, rejecting stale modifications.
@@ -156,10 +159,11 @@ flowchart TD
 - **Non-Destructive Rollback:** `codepilot rollback` restores files directly from backup manifests without destructive Git commands (`git reset --hard` and `git clean` are strictly forbidden).
 
 ### 2.8 Safe Test Execution & Failure Analysis (`src/codepilot/core/tester.py`, `test_analyzer.py`)
-- **Test Discovery:** Safe heuristics identify pytest configurations, test directories, and runner commands.
+- **Test Discovery:** Synchronized heuristics across `discover_project_tests()` and `detect_safe_test_command()` identify test suites (`pytest`, `npm test`, `cargo test`, `go test`) and test files (`test_*.py`, `*_test.py`). Fails informatively when no runner is detected.
 - **Preview Execution:** `codepilot test --preview` displays the discovered command and working directory without spawning subprocesses.
+- **Configurable Timeouts:** Enforces execution timeout via `--timeout` override or configuration settings to terminate runaway processes cleanly.
 - **Concurrency Locking:** Acquires exclusive file lock (`.codepilot/test.lock`) recording current PID to prevent overlapping test executions.
-- **Bounded Controls:** Enforces process timeout kills and truncates stdout/stderr capture to 64 KB (65,536 characters).
+- **Bounded Controls:** Truncates stdout/stderr capture to 64 KB (65,536 characters).
 - **Single-Turn Failure Correction:** `codepilot test --approved --fix` parses test failure traces, isolates culprit files and lines, and queries local LLMs to propose reviewable candidate patches.
 
 ### 2.9 Centralized Security & File Ownership (`src/codepilot/core/security.py`)
@@ -285,4 +289,5 @@ Developer runs: codepilot evaluate [--provider <standalone|ollama|mock>] [--mode
 | **Safe Test Runner** | `core/tester.py`, `test_analyzer.py` | Test discovery, PID lock, 64KB capture, failure analysis | `tests/test_test.py` |
 | **Security & Ownership** | `core/security.py` | Root detection, 5 ownership tiers, permission checks | `tests/test_ownership_root.py`, `test_phase9_security_recovery.py` |
 | **Dataset & Evaluation** | `core/dataset/`, `core/evaluation/` | JSONL schemas, leakage validator, benchmark metrics | `tests/test_dataset.py`, `test_evaluation.py` |
+| **Command-Driven Intelligence** | `core/scanner.py`, `core/fixer.py`, `cli.py` | Ad-hoc target/issue fixing, comment-free scanning/analysis, safety gating | `tests/test_command_driven.py` |
 | **End-to-End Lifecycle** | `cli.py` & core orchestrator | 13-stage end-to-end integration across isolated repositories | `tests/test_phase10_integration.py` |

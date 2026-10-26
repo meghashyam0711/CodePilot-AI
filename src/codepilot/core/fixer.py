@@ -482,6 +482,32 @@ def generate_mock_file_fix(
 
     prompt_clean = prompt.strip().lower()
 
+    # If targeting a function definition header for a non-syntax fix, target the body
+    if target_line.strip().startswith(("def ", "async def ")) and not ("syntax" in prompt_clean):
+        body_indent = indent + "    "
+        if target_idx + 1 < len(original_lines) and original_lines[target_idx + 1].startswith(body_indent):
+            return generate_mock_file_fix(
+                original_lines,
+                line_number + 1,
+                prompt,
+                instruction_type=instruction_type,
+            )
+        else:
+            new_lines = list(original_lines)
+            if "return true" in prompt_clean:
+                body_fix = f"{body_indent}return True\n"
+            elif "return false" in prompt_clean:
+                body_fix = f"{body_indent}return False\n"
+            elif "zero" in prompt_clean or "division" in prompt_clean:
+                body_fix = f"{body_indent}if b == 0:\n{body_indent}    return 0\n{body_indent}return a / b\n"
+            elif "even" in prompt_clean:
+                body_fix = f"{body_indent}return n % 2 == 0\n"
+            else:
+                body_fix = f"{body_indent}# Automated fix for: {prompt.strip()}\n{body_indent}pass\n"
+            new_lines.insert(target_idx + 1, body_fix)
+            return new_lines
+
+
     # Rule-based deterministic substitutions for testing and offline scenarios
     if instruction_type == "AI-DOCS" or (
         "doc" in prompt_clean or "document" in prompt_clean or "ai-docs" in prompt_clean
@@ -501,13 +527,30 @@ def generate_mock_file_fix(
         replacement = f"{indent}return n % 2 == 0\n"
     elif "add" in prompt_clean or "sum" in prompt_clean:
         replacement = f"{indent}return a + b\n"
+    elif "zero" in prompt_clean or "division" in prompt_clean:
+        if "return" in target_line:
+            replacement = f"{indent}if b == 0:\n{indent}    return 0\n{target_line}"
+        else:
+            replacement = f"{indent}if b == 0:\n{indent}    return 0\n{indent}return a / b\n"
+    elif "syntax" in prompt_clean:
+        trimmed = target_line.rstrip()
+        if trimmed and not trimmed.endswith(":") and any(trimmed.startswith(kw) for kw in ("def ", "class ", "if ", "for ", "while ", "try", "except", "finally", "with ", "elif ")):
+            replacement = f"{trimmed}:\n"
+        else:
+            replacement = f"{indent}# Fixed syntax error\n{indent}pass\n"
     elif "todo" in prompt_clean or "implement" in prompt_clean:
         action = prompt.strip()
         replacement = f"{indent}# Resolved: {action}\n{indent}pass\n"
     elif "fix" in prompt_clean:
-        replacement = f"{indent}# Applied automated fix for: {prompt.strip()}\n"
+        if target_line.strip().startswith("#"):
+            replacement = f"{indent}# Applied automated fix for: {prompt.strip()}\n"
+        else:
+            replacement = f"{indent}# Applied automated fix for: {prompt.strip()}\n{target_line}"
     else:
-        replacement = f"{indent}# Completed AI Task: {prompt.strip()}\n"
+        if target_line.strip().startswith("#"):
+            replacement = f"{indent}# Completed AI Task: {prompt.strip()}\n"
+        else:
+            replacement = f"{indent}# Completed AI Task: {prompt.strip()}\n{target_line}"
 
     new_lines = list(original_lines)
     new_lines[target_idx] = replacement
@@ -627,6 +670,7 @@ def generate_preview_patch(
     override_provider: Optional[str] = None,
     override_model: Optional[str] = None,
     target_task_id: Optional[str] = None,
+    adhoc_task: Optional[Any] = None,
 ) -> PatchBundle:
     """Generate proposed code modifications and unified Git diff.
 
@@ -640,6 +684,7 @@ def generate_preview_patch(
         override_provider: Optional runtime provider override.
         override_model: Optional model identifier override.
         target_task_id: Optional task ID to isolate patch generation.
+        adhoc_task: Optional ad-hoc InstructionTask for command-driven fixing.
 
     Returns:
         PatchBundle: Contains generated diffs and file states.
@@ -677,10 +722,41 @@ def generate_preview_patch(
 
     root = project_root.resolve()
 
+    # Handle ad-hoc command-driven task
+    if adhoc_task is not None:
+        from codepilot.core.planner import PlanTask
+        t_id = getattr(adhoc_task, "id", None) or "adhoc-task-1"
+        t_file = getattr(adhoc_task, "file_path", "")
+        t_line = getattr(adhoc_task, "line_number", 1) or 1
+        t_desc = getattr(adhoc_task, "description", "") or getattr(adhoc_task, "prompt", "")
+        t_type = getattr(adhoc_task, "instruction_type", "AI-FIX")
+        t_sym = getattr(adhoc_task, "target_symbol", None)
+        t_sym_type = getattr(adhoc_task, "target_symbol_type", None)
+
+        adhoc_plan_task = PlanTask(
+            task_id=t_id,
+            instruction_id=t_id,
+            target_file=t_file,
+            line_number=t_line,
+            instruction_type=t_type,
+            description=t_desc,
+            risk_level="MEDIUM",
+            scope="FUNCTION" if t_sym else "MODULE",
+            steps=[f"1. Repair {t_file}:{t_line} for {t_desc}"],
+            target_symbol=t_sym,
+            target_symbol_type=t_sym_type,
+        )
+        plan = Plan(
+            plan_id="plan-adhoc",
+            project_root=str(root),
+            created_at=datetime.now(timezone.utc).isoformat(),
+            tasks=[adhoc_plan_task],
+        )
+
     # Discover instructions if plan not provided
     if plan is None or not plan.tasks:
         scan_result = scan_repository(root, config)
-        if not scan_result.instructions:
+        if not scan_result.instructions and not getattr(scan_result, "static_findings", []):
             return PatchBundle(
                 patch_id="patch-empty",
                 created_at=datetime.now(timezone.utc).isoformat(),

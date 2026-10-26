@@ -1,4 +1,294 @@
-# CodePilot AI — Product Requirements Document (PRD)
+# Phase 10A.1 — Fix and Test the Standalone GGUF Backend
+
+## Objective
+
+Fix the existing standalone GGUF integration in CodePilot AI. Preserve the current architecture, Ollama support, mock provider, security safeguards, and all existing functionality.
+
+**Do not rebuild the project from scratch. Make only necessary, targeted changes.**
+
+## 1. Inspect Before Editing
+
+Read these files and their related implementations:
+
+- `src/codepilot/core/models/base.py`
+- `src/codepilot/core/models/standalone_client.py`
+- `src/codepilot/core/models/factory.py`
+- `src/codepilot/config.py`
+- `tests/test_models.py`
+- `pyproject.toml`
+- `.gitignore`
+
+Inspect Git status and existing user changes before editing. Confirm the actual dataclass fields, constructor signatures, configuration conventions, and test setup.
+
+## 2. Fix the Existing Defects
+
+### A. ModelResponse constructor
+
+In `standalone_client.py`, replace the unsupported `completion=` argument with the correct field defined by `ModelResponse`, expected to be `content=`.
+
+Preserve all other required response metadata and follow the existing interface.
+
+Do not modify the shared `ModelResponse` interface unnecessarily.
+
+### B. ModelInfo constructor
+
+Remove the unsupported `modified_at` argument from `ModelInfo` construction, unless inspection confirms that the actual interface has changed.
+
+Ensure `list_available_models()` works correctly with valid GGUF files.
+
+### C. Cache the loaded model
+
+Implement lazy model-instance caching using an appropriate instance attribute, such as `self._llm`.
+
+Requirements:
+
+- Load the model only when generation is first requested.
+- Reuse the loaded instance for subsequent requests.
+- Avoid loading the same model multiple times concurrently.
+- Handle initialization and inference errors clearly.
+- Do not reload the model on every generation call.
+- Do not automatically download models.
+
+### D. GPU-layer configuration
+
+Inspect the existing configuration model and add a configurable `n_gpu_layers` setting only if needed.
+
+Requirements:
+
+- Pass the configured value to `llama_cpp.Llama`.
+- Document the meaning of `n_gpu_layers`.
+- Do not assume CUDA support is installed.
+- Do not automatically detect or modify GPU drivers.
+- Do not automatically select an aggressive GPU configuration.
+- Keep CPU execution possible when GPU offloading is unavailable.
+
+Use safe defaults compatible with the project's existing configuration conventions.
+
+### E. GGUF file protection
+
+Update `.gitignore` to prevent accidental tracking of local GGUF model weights in the intended model storage location.
+
+Preserve existing ignore rules. Do not hide unrelated project files or modify Git history.
+
+## 3. Add Deterministic Unit Tests
+
+Add a dedicated `TestStandaloneGGUFClient` test class or follow the existing test organization.
+
+Use mocked `llama_cpp.Llama`, temporary directories, and controlled test fixtures.
+
+Cover these cases:
+
+1. Default standalone client configuration.
+2. Missing `llama_cpp` dependency.
+3. Missing model file.
+4. Checksum verification failure.
+5. Successful generation and correct `ModelResponse` formatting.
+6. Model-instance reuse across multiple generation requests.
+7. Correct GPU-layer parameter forwarding.
+8. Successful GGUF model listing.
+9. Correct factory selection for the standalone provider.
+10. Model initialization and inference failures.
+11. No silent fallback to mock responses.
+
+Tests must not require actual model weights, network access, a GPU, or a running Ollama server.
+
+Do not weaken, delete, or skip existing tests.
+
+## 4. Preserve Existing Security Requirements
+
+- Never apply source modifications without explicit user approval through the application's approval workflow.
+- Never execute model-generated shell commands automatically.
+- Never execute untrusted repository scripts automatically.
+- Do not alter unrelated files or user changes.
+- Do not use destructive Git commands.
+- Do not delete existing GGUF files or Ollama models.
+- Do not download models or install dependencies.
+- Do not perform real inference, training, or GPU workloads during this phase.
+- Do not silently substitute mock output when standalone inference fails.
+- Preserve existing Ollama and mock provider behavior.
+
+## 5. Test and Validation Procedure
+
+Before running tests, inspect the test configuration and determine whether the selected tests could execute untrusted project code.
+
+Do not install packages or modify the environment.
+
+After confirming the test scope is safe and obtaining authorization for test execution, run:
+
+`python -m pytest tests/test_models.py -v`
+
+If the focused tests pass, run:
+
+`python -m pytest tests/ -v`
+
+Report the actual test counts, failures, and command outputs. If any test fails, investigate and fix the underlying defect without weakening assertions.
+
+Do not claim tests passed unless they were actually executed.
+
+## 6. Final Report
+
+Provide:
+
+1. Summary of the original defects.
+2. Files modified and the reason for each change.
+3. New tests added.
+4. Exact test commands and actual results.
+5. Remaining limitations or compatibility concerns.
+6. Whether standalone GGUF support is ready for a real inference test.
+7. Separate approval requests for installing `llama-cpp-python`, downloading a GGUF model, and running real inference.
+
+## Scope Boundary
+
+This phase covers **fixing and testing the existing backend only**.
+
+Do not install `llama-cpp-python`, download GGUF weights, execute real inference, modify drivers, or launch GPU workloads. Those actions require a separate review and explicit approval.
+
+Stop after completing this phase and providing the report.# Phase 10A.1 — Fix and Test the Standalone GGUF Backend
+
+## Objective
+
+Fix the existing standalone GGUF integration in CodePilot AI. Preserve the current architecture, Ollama support, mock provider, security safeguards, and all existing functionality.
+
+**Do not rebuild the project from scratch. Make only necessary, targeted changes.**
+
+## 1. Inspect Before Editing
+
+Read these files and their related implementations:
+
+- `src/codepilot/core/models/base.py`
+- `src/codepilot/core/models/standalone_client.py`
+- `src/codepilot/core/models/factory.py`
+- `src/codepilot/config.py`
+- `tests/test_models.py`
+- `pyproject.toml`
+- `.gitignore`
+
+Inspect Git status and existing user changes before editing. Confirm the actual dataclass fields, constructor signatures, configuration conventions, and test setup.
+
+## 2. Fix the Existing Defects
+
+### A. ModelResponse constructor
+
+In `standalone_client.py`, replace the unsupported `completion=` argument with the correct field defined by `ModelResponse`, expected to be `content=`.
+
+Preserve all other required response metadata and follow the existing interface.
+
+Do not modify the shared `ModelResponse` interface unnecessarily.
+
+### B. ModelInfo constructor
+
+Remove the unsupported `modified_at` argument from `ModelInfo` construction, unless inspection confirms that the actual interface has changed.
+
+Ensure `list_available_models()` works correctly with valid GGUF files.
+
+### C. Cache the loaded model
+
+Implement lazy model-instance caching using an appropriate instance attribute, such as `self._llm`.
+
+Requirements:
+
+- Load the model only when generation is first requested.
+- Reuse the loaded instance for subsequent requests.
+- Avoid loading the same model multiple times concurrently.
+- Handle initialization and inference errors clearly.
+- Do not reload the model on every generation call.
+- Do not automatically download models.
+
+### D. GPU-layer configuration
+
+Inspect the existing configuration model and add a configurable `n_gpu_layers` setting only if needed.
+
+Requirements:
+
+- Pass the configured value to `llama_cpp.Llama`.
+- Document the meaning of `n_gpu_layers`.
+- Do not assume CUDA support is installed.
+- Do not automatically detect or modify GPU drivers.
+- Do not automatically select an aggressive GPU configuration.
+- Keep CPU execution possible when GPU offloading is unavailable.
+
+Use safe defaults compatible with the project's existing configuration conventions.
+
+### E. GGUF file protection
+
+Update `.gitignore` to prevent accidental tracking of local GGUF model weights in the intended model storage location.
+
+Preserve existing ignore rules. Do not hide unrelated project files or modify Git history.
+
+## 3. Add Deterministic Unit Tests
+
+Add a dedicated `TestStandaloneGGUFClient` test class or follow the existing test organization.
+
+Use mocked `llama_cpp.Llama`, temporary directories, and controlled test fixtures.
+
+Cover these cases:
+
+1. Default standalone client configuration.
+2. Missing `llama_cpp` dependency.
+3. Missing model file.
+4. Checksum verification failure.
+5. Successful generation and correct `ModelResponse` formatting.
+6. Model-instance reuse across multiple generation requests.
+7. Correct GPU-layer parameter forwarding.
+8. Successful GGUF model listing.
+9. Correct factory selection for the standalone provider.
+10. Model initialization and inference failures.
+11. No silent fallback to mock responses.
+
+Tests must not require actual model weights, network access, a GPU, or a running Ollama server.
+
+Do not weaken, delete, or skip existing tests.
+
+## 4. Preserve Existing Security Requirements
+
+- Never apply source modifications without explicit user approval through the application's approval workflow.
+- Never execute model-generated shell commands automatically.
+- Never execute untrusted repository scripts automatically.
+- Do not alter unrelated files or user changes.
+- Do not use destructive Git commands.
+- Do not delete existing GGUF files or Ollama models.
+- Do not download models or install dependencies.
+- Do not perform real inference, training, or GPU workloads during this phase.
+- Do not silently substitute mock output when standalone inference fails.
+- Preserve existing Ollama and mock provider behavior.
+
+## 5. Test and Validation Procedure
+
+Before running tests, inspect the test configuration and determine whether the selected tests could execute untrusted project code.
+
+Do not install packages or modify the environment.
+
+After confirming the test scope is safe and obtaining authorization for test execution, run:
+
+`python -m pytest tests/test_models.py -v`
+
+If the focused tests pass, run:
+
+`python -m pytest tests/ -v`
+
+Report the actual test counts, failures, and command outputs. If any test fails, investigate and fix the underlying defect without weakening assertions.
+
+Do not claim tests passed unless they were actually executed.
+
+## 6. Final Report
+
+Provide:
+
+1. Summary of the original defects.
+2. Files modified and the reason for each change.
+3. New tests added.
+4. Exact test commands and actual results.
+5. Remaining limitations or compatibility concerns.
+6. Whether standalone GGUF support is ready for a real inference test.
+7. Separate approval requests for installing `llama-cpp-python`, downloading a GGUF model, and running real inference.
+
+## Scope Boundary
+
+This phase covers **fixing and testing the existing backend only**.
+
+Do not install `llama-cpp-python`, download GGUF weights, execute real inference, modify drivers, or launch GPU workloads. Those actions require a separate review and explicit approval.
+
+Stop after completing this phase and providing the report.# CodePilot AI — Product Requirements Document (PRD)
 
 > **Product Requirements, User Workflows, Functional Specifications, and Safety Standards**
 

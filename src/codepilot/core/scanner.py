@@ -4,6 +4,7 @@ Inspects source code files, identifies supported AI instruction comments,
 and extracts contextual metadata while honoring protected files and directories.
 """
 
+import ast
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -21,6 +22,28 @@ from codepilot.exceptions import ScanError
 from codepilot.logging_config import get_logger
 
 logger = get_logger("core.scanner")
+
+KNOWN_CONFIG_FILENAMES: Set[str] = {
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "package.json",
+    "Cargo.toml",
+    "go.mod",
+    "requirements.txt",
+    ".codepilot.toml",
+    "pytest.ini",
+    "tox.ini",
+    "tsconfig.json",
+}
+
+TEST_DIR_NAMES: Set[str] = {
+    "test",
+    "tests",
+    "testing",
+    "spec",
+    "specs",
+}
 
 # Supported AI comment prefixes
 # Matches:
@@ -128,6 +151,12 @@ class ScanResult:
     timestamp: str
     warnings: List[str] = field(default_factory=list)
     counts_by_type: Dict[str, int] = field(default_factory=dict)
+    discovered_files: List[str] = field(default_factory=list)
+    file_types: Dict[str, int] = field(default_factory=dict)
+    skipped_files: List[str] = field(default_factory=list)
+    static_findings: List[Dict[str, Any]] = field(default_factory=list)
+    test_directories: List[str] = field(default_factory=list)
+    config_files: List[str] = field(default_factory=list)
 
     @property
     def tasks(self) -> List[InstructionComment]:
@@ -147,6 +176,12 @@ class ScanResult:
             "warnings": self.warnings,
             "instructions": [inst.to_dict() for inst in self.instructions],
             "tasks": [inst.to_dict() for inst in self.instructions],
+            "discovered_files": self.discovered_files,
+            "file_types": self.file_types,
+            "skipped_files": self.skipped_files,
+            "static_findings": self.static_findings,
+            "test_directories": self.test_directories,
+            "config_files": self.config_files,
             "timestamp": self.timestamp,
         }
 
@@ -161,6 +196,12 @@ class ScanResult:
             timestamp=data.get("timestamp", ""),
             warnings=data.get("warnings", []),
             counts_by_type=data.get("counts_by_type", {}),
+            discovered_files=data.get("discovered_files", []),
+            file_types=data.get("file_types", {}),
+            skipped_files=data.get("skipped_files", []),
+            static_findings=data.get("static_findings", []),
+            test_directories=data.get("test_directories", []),
+            config_files=data.get("config_files", []),
         )
 
 
@@ -245,6 +286,13 @@ def scan_repository(
 
     all_instructions: List[InstructionComment] = []
     scanned_count = 0
+    discovered_files: List[str] = []
+    file_types: Dict[str, int] = {}
+    skipped_files: List[str] = []
+    static_findings: List[Dict[str, Any]] = []
+    test_directories: List[str] = []
+    config_files: List[str] = []
+    seen_test_dirs: Set[str] = set()
 
     try:
         for dirpath, dirnames, filenames in os.walk(root):
@@ -257,6 +305,16 @@ def scan_repository(
             ]
 
             current_dir = Path(dirpath)
+            try:
+                rel_dir = str(current_dir.relative_to(root)).replace("\\", "/")
+            except ValueError:
+                rel_dir = ""
+
+            if rel_dir and any(part.lower() in TEST_DIR_NAMES for part in current_dir.relative_to(root).parts):
+                top_test_part = current_dir.relative_to(root).parts[0]
+                if top_test_part not in seen_test_dirs:
+                    seen_test_dirs.add(top_test_part)
+                    test_directories.append(top_test_part)
 
             for filename in filenames:
                 # Skip hidden and dotfiles
@@ -264,28 +322,71 @@ def scan_repository(
                     continue
 
                 file_path = current_dir / filename
+                try:
+                    rel_path = str(file_path.relative_to(root)).replace("\\", "/")
+                except ValueError:
+                    rel_path = filename
+
+                # Discover configuration files
+                if filename.lower() in KNOWN_CONFIG_FILENAMES and rel_path not in config_files:
+                    config_files.append(rel_path)
 
                 # Check extension against supported source code extensions
                 if file_path.suffix.lower() not in SOURCE_EXTENSIONS:
+                    skipped_files.append(f"{rel_path} (unsupported extension)")
                     continue
 
                 # Check protected files pattern
                 if is_protected_file(file_path, root, config.protected_files):
+                    skipped_files.append(f"{rel_path} (protected file)")
                     continue
 
                 # Check max input size
                 try:
                     if file_path.stat().st_size > config.max_input_size:
+                        skipped_files.append(f"{rel_path} (exceeds max size {config.max_input_size} bytes)")
                         continue
                 except OSError:
                     continue
 
                 # Check binary file
                 if is_binary_file(file_path):
+                    skipped_files.append(f"{rel_path} (binary file)")
                     continue
 
-
                 scanned_count += 1
+                discovered_files.append(rel_path)
+                ext = file_path.suffix.lower()
+                file_types[ext] = file_types.get(ext, 0) + 1
+
+                # Static analysis check 1: Empty file check
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="replace")
+                    if not content.strip():
+                        static_findings.append({
+                            "file": rel_path,
+                            "line": 1,
+                            "type": "empty_file",
+                            "severity": "warning",
+                            "message": f"Source file '{rel_path}' is empty.",
+                        })
+                    elif ext in (".py", ".pyi"):
+                        # Static analysis check 2: Python AST parse error detection
+                        try:
+                            ast.parse(content)
+                        except SyntaxError as e:
+                            static_findings.append({
+                                "file": rel_path,
+                                "line": getattr(e, "lineno", 1) or 1,
+                                "column": getattr(e, "offset", 0) or 0,
+                                "type": "syntax_error",
+                                "severity": "error",
+                                "message": f"Python syntax error: {e.msg if hasattr(e, 'msg') else str(e)}",
+                            })
+                except Exception as ex:
+                    logger.debug("Failed static analysis inspection on %s: %s", rel_path, ex)
+
+                # Optional comment-based task discovery
                 file_instructions = scan_file(file_path, root)
                 all_instructions.extend(file_instructions)
 
@@ -301,6 +402,12 @@ def scan_repository(
         instructions=all_instructions,
         timestamp=datetime.now(timezone.utc).isoformat(),
         counts_by_type=type_counts,
+        discovered_files=sorted(discovered_files),
+        file_types=dict(sorted(file_types.items())),
+        skipped_files=skipped_files,
+        static_findings=static_findings,
+        test_directories=sorted(test_directories),
+        config_files=sorted(config_files),
     )
 
 

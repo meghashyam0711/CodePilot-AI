@@ -237,7 +237,7 @@ def discover_project_tests(
 
     return TestDiscoveryResult(
         framework=framework,
-        proposed_command=proposed_cmd or "pytest",
+        proposed_command=proposed_cmd,
         working_directory=str(root),
         discovered_files=sorted(discovered_files),
         total_test_files=len(discovered_files),
@@ -249,11 +249,14 @@ def detect_safe_test_command(project_root: Path) -> Optional[str]:
     """Auto-detect standard test runner based on project workspace indicators."""
     root = project_root.resolve()
 
+    py_test_files = list(root.rglob("test_*.py")) + list(root.rglob("*_test.py"))
     if (
         (root / "pyproject.toml").is_file()
         or (root / "pytest.ini").is_file()
+        or (root / "setup.cfg").is_file()
         or (root / "tests").is_dir()
         or (root / "setup.py").is_file()
+        or bool(py_test_files)
     ):
         executable = sys.executable
         if " " in executable and not (executable.startswith('"') and executable.endswith('"')):

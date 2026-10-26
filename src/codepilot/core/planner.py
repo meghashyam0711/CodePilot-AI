@@ -139,12 +139,56 @@ def generate_plan(scan_result: ScanResult) -> Plan:
         PlanError: If planning fails or no instructions are present.
     """
     if not scan_result.instructions:
-        logger.info("Scan result contains no AI instruction comments.")
+        findings = getattr(scan_result, "static_findings", [])
+        if not findings:
+            logger.info("Scan result contains no AI instruction comments or static findings.")
+            return Plan(
+                plan_id="plan-empty",
+                project_root=scan_result.project_root,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                tasks=[],
+            )
+
+        tasks: List[PlanTask] = []
+        plan_id_hash = hashlib.sha256(
+            f"{scan_result.project_root}:{len(findings)}:{datetime.now(timezone.utc).timestamp()}".encode("utf-8")
+        ).hexdigest()[:10]
+
+        for index, finding in enumerate(findings, start=1):
+            task_id = f"FINDING-{index:03d}"
+            f_file = finding.get("file", "")
+            f_line = finding.get("line", 1)
+            f_msg = finding.get("message", "Static issue detected")
+            f_sev = finding.get("severity", "warning")
+            risk = "HIGH" if f_sev == "error" else "MEDIUM"
+            steps = [
+                f"1. Inspect finding in '{f_file}' at line {f_line}",
+                f"2. Formulate code correction for '{f_msg}'",
+                f"3. Generate unified Git diff via 'codepilot fix {f_file}'",
+                "4. Obtain explicit approval and apply patch via 'codepilot apply --approved'",
+                "5. Execute test suite via 'codepilot test' to verify correctness",
+            ]
+            tasks.append(
+                PlanTask(
+                    task_id=task_id,
+                    instruction_id=task_id,
+                    target_file=f_file,
+                    line_number=f_line,
+                    instruction_type="AI-FIX",
+                    description=f_msg,
+                    risk_level=risk,
+                    scope="LINE",
+                    steps=steps,
+                    target_symbol=None,
+                    target_symbol_type=None,
+                )
+            )
+
         return Plan(
-            plan_id="plan-empty",
+            plan_id=f"plan-{plan_id_hash}",
             project_root=scan_result.project_root,
             created_at=datetime.now(timezone.utc).isoformat(),
-            tasks=[],
+            tasks=tasks,
         )
 
     tasks: List[PlanTask] = []
