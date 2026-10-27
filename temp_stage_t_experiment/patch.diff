@@ -1,0 +1,33 @@
+--- a/grade_normalizer.py
++++ b/grade_normalizer.py
+@@ -1,7 +1,29 @@
+ import re
+ 
+ def normalize_grade(grade_str: str) -> str:
+-    # AI-DOCS: Add a comprehensive docstring explaining canonical grade mapping (standard numbers 1-12, Roman numerals i-xii, and word numbers first-twelfth)
++    """
++    Normalize a grade string to a standard number between 1 and 12, or a corresponding Roman numeral or word number.
++
++    Args:
++    grade_str (str): The grade string to normalize.
++
++    Returns:
++    str: The normalized grade number or Roman numeral.
++
++    Examples:
++    >>> normalize_grade("8")
++    "8"
++    >>> normalize_grade("viii")
++    "8"
++    >>> normalize_grade("xii")
++    "12"
++    >>> normalize_grade("first")
++    "1"
++    >>> normalize_grade("twelfth")
++    "12"
++    >>> normalize_grade("invalid")
++    "invalid"
++    """
+     if not grade_str:
+         return ""
+         
