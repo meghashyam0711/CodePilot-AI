@@ -2,22 +2,23 @@
 
 > **Detailed Specifications for CLI Ergonomics, Comment Grammar, Prompt Construction, and Patch Safety**
 
-**Document Version:** 2.0.0  
-**Current Release:** v0.4.0  
+**Document Version:** 2.1.0  
+**Current Release:** v0.4.1  
 **Status:** Approved  
+**Author / Maintainer:** CodePilot AI Team  
 
 ---
 
 ## 1. CLI Interaction Design & Terminal Presentation
 
 ### 1.1 Command Design Principles
-- **Git-Like Verbs:** Subcommands follow familiar development actions: `init`, `status`, `doctor`, `scan`, `tasks`, `analyze`, `plan`, `explain`, `fix`, `diff`, `apply`, `rollback`, `test`.
+- **Familiar Verbs:** Subcommands follow standard Git-like actions: `init`, `status`, `doctor`, `scan`, `tasks`, `analyze`, `plan`, `explain`, `fix`, `diff`, `apply`, `rollback`, `test`, and `evaluate`.
 - **Standardized Flags:**
-  - `--directory` / `-d`: Target repository path (defaults to current working directory).
-  - `--json`: Emit machine-readable JSON without ANSI styling or terminal decorations.
-  - `--detailed`: Expand truncated summaries and show additional technical metadata.
+  - `--directory` / `-d`: Target repository path (defaults to the current working directory).
+  - `--json`: Emit clean, machine-readable JSON without ANSI styling or terminal decorations.
+  - `--detailed`: Show additional technical metadata and un-truncated summaries.
   - `--help` / `-h`: Context-sensitive help with usage examples.
-- **Graceful Terminal Degradation:** Rich tables are configured with bounded column widths (`max_width=80` to `max_width=100`) and ellipsis truncation (`...`) to prevent awkward line wrapping on standard 80-column terminal displays.
+- **Graceful Terminal Formatting:** Rich tables use bounded column widths (`max_width=80` to `max_width=100`) and ellipsis truncation (`...`) to prevent awkward text wrapping on standard terminal screens.
 - **Predictable Exit Codes:**
   - `0`: Success / clean execution.
   - `1`: System error, failed execution, or runtime exception.
@@ -27,7 +28,7 @@
 
 | Command | Invocation | Terminal Output | Machine Output (`--json`) |
 |---|---|---|---|
-| `status` | `codepilot status` | Rich status card showing Git branch, engine status, file counts | JSON status summary object |
+| `status` | `codepilot status` | Rich status card showing Git branch, engine status, and file counts | JSON status summary object |
 | `doctor` | `codepilot doctor` | Diagnostic checklist (Python, Git, Security Enclaves, Model Runtime) | JSON array of diagnostic checks |
 | `init` | `codepilot init` | Confirmation panel with configuration path | N/A (creates `.codepilot.toml`) |
 | `scan` | `codepilot scan` | Project breakdown (extensions, configs, tests, skipped), static defects + optional comment hints | JSON scan result object |
@@ -35,7 +36,7 @@
 | `analyze` | `codepilot analyze` | Metrics, Language distribution, Entry points, Module breakdown, Static defects | JSON `ProjectArchitectureReport` |
 | `plan` | `codepilot plan` | Plan ID, Task breakdown, Risk levels, Scope estimation (from comments or static findings) | JSON `ImplementationPlan` |
 | `explain` | `codepilot explain [ID]` | Model explanation, proposed approach, and inference metrics | JSON object (task, explanation, context) |
-| `fix` | `codepilot fix [target] [--issue] [--preview]` | Investigation explanation + unified Git diff staged in `.codepilot/patches/pending_patch.json` | JSON patch bundle object |
+| `fix` | `codepilot fix [target] [--issue] [--preview]` | Investigation explanation + candidate unified Git diff staged in `.codepilot/patches/pending_patch.json` | JSON patch bundle object |
 | `diff` | `codepilot diff` | Syntax-highlighted unified diff for inspection without file writes | JSON pending patch inspection object |
 | `apply --approved` | `codepilot apply --approved` | Pre-apply backup snapshot + SHA256 validated modification | JSON application result object |
 | `rollback` | `codepilot rollback [--list]` | Restores pre-apply file snapshots without destructive Git commands | JSON rollback status object |
@@ -44,18 +45,18 @@
 
 ---
 
-## 2. AI Instruction Comment Syntax & Grammar (Optional Task Hints)
+## 2. In-Code Task Hints & Comment Grammar (Optional)
 
 > [!NOTE]
-> In-code instruction comments are **optional task hints**, not prerequisites. Developers can perform all scanning, analysis, and fix workflows directly via terminal commands without modifying source files.
+> In-code instruction comments are **optional task hints**, not prerequisites. You can run all scanning, analysis, and fix workflows directly from your terminal without adding special comments to your source code.
 
 ### 2.1 Supported Instruction Types
 CodePilot AI recognizes 5 canonical instruction types:
-1. `AI-FIX`: Bug fix, error handling, edge-case remediation.
+1. `AI-FIX`: Bug fix, error handling, or edge-case remediation.
 2. `AI-TASK`: New feature implementation or specific coding task.
-3. `AI-REFACTOR`: Code clean-up, structure improvement, performance tuning preserving behavior.
+3. `AI-REFACTOR`: Code cleanup, structural improvement, or performance tuning that preserves existing behavior.
 4. `AI-TEST`: Unit test, fixture, or integration test generation.
-5. `AI-DOCS`: Docstring creation, type annotation, documentation update.
+5. `AI-DOCS`: Docstring creation, type annotations, or documentation updates.
 
 Legacy aliases supported: `AI` (maps to `AI-TASK`), `AI-TODO` (maps to `AI-TASK`), `CODEPILOT` (maps to `AI-TASK`).
 
@@ -63,12 +64,12 @@ Legacy aliases supported: `AI` (maps to `AI-TASK`), `AI-TODO` (maps to `AI-TASK`
 
 #### Python
 ```python
-# Single-line instruction preceding function:
+# Single-line instruction preceding a function:
 # AI-FIX: Handle None input safely
 def sanitize_input(value):
     ...
 
-# Single-line instruction inside function body:
+# Single-line instruction inside a function body:
 def calculate_average(numbers):
     # AI-FIX: Handle empty lists safely without ZeroDivisionError
     return sum(numbers) / len(numbers)
@@ -107,15 +108,15 @@ CREATE TABLE audit_logs (...);
 ```
 
 ### 2.3 Tokenizer Safety Guarantees
-- **Exclusion of String Literals:** Python parsing uses `tokenize.tokenize`. A string variable containing an instruction keyword (e.g., `query = "SELECT # AI-FIX: false positive"`) or a docstring is never extracted as an instruction comment.
+- **Exclusion of String Literals:** Python parsing uses Python's standard `tokenize` module on source bytes. A string variable containing an instruction keyword (e.g., `query = "SELECT # AI-FIX: false positive"`) or a docstring is never extracted as a comment.
 - **Normalization:** Keywords are case-insensitive (`# ai-fix:` matches `AI-FIX`). Leading/trailing colons and whitespace are trimmed cleanly.
 
 ---
 
-## 3. Repository Context Selection Strategy
+## 3. Context Selection Strategy
 
 ### 3.1 Context Engine Pipeline
-When an instruction task is selected for explanation or code generation, `ProjectContextEngine` gathers relevant context deterministically:
+When a task or file is selected for explanation or code generation, `ProjectContextEngine` gathers relevant context deterministically:
 
 1. **Target Snippet Extraction:**
    - Resolves the target symbol's AST node range.
@@ -125,14 +126,14 @@ When an instruction task is selected for explanation or code generation, `Projec
    - Extracts top-level module imports to inform the LLM about available dependencies and internal utilities.
 3. **Associated Test Pairing:**
    - Searches for sibling test files matching conventional patterns (`tests/test_<stem>.py`, `test_<stem>.py`, `<stem>_test.py`).
-   - Pairs relevant test assertions with the prompt context to guide test-driven implementation.
+   - Pairs relevant test assertions with prompt context to guide test-driven implementation.
 4. **Token Budget Allocation:**
    - Estimates tokens conservatively (~4 characters per token).
    - Priority 1: Target code snippet (retained in full).
    - Priority 2: Associated unit test cases.
    - Priority 3: Module imports and architectural summary.
-   - Truncates auxiliary context gracefully if total estimate exceeds `max_context_tokens` (default 2,048).
-5. **Defensive Secret Exclusion:**
+   - Truncates auxiliary context gracefully if the total estimate exceeds `max_context_tokens` (default 2,048).
+5. **Protecting Sensitive Files:**
    - Scans file paths against protected patterns (`.env`, `credentials.json`, `*.pem`, `*.key`).
    - If a target or sibling file is sensitive, context assembly is halted with `bundle.is_safe = False`.
 
@@ -227,7 +228,7 @@ Generate the unified Git diff:
 }
 ```
 
-### 5.2 Staleness Defense
+### 5.2 Checking for File Changes (Staleness Protection)
 Before modifying disk, `apply_approved_patch` reads `target_file`, computes its current SHA256 checksum, and compares it with `original_sha256`. If they differ (indicating the developer modified the file after running `fix --preview`), the patch is rejected immediately to prevent conflicting edits.
 
 ---

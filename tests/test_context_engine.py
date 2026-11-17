@@ -410,7 +410,7 @@ class TestCLIExplainAndPlanLLM:
             counts_by_type={"AI-FIX": 1},
         )
 
-        with patch("codepilot.cli.InstructionParserEngine.parse", return_value=fake_result):
+        with patch("codepilot.cli.inspection.InstructionParserEngine.parse", return_value=fake_result):
             result = cli_runner.invoke(
                 app,
                 ["explain", "--directory", str(tmp_path)],

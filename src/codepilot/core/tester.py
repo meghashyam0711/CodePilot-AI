@@ -14,10 +14,12 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from codepilot.config import DEFAULT_TEST_TIMEOUT_SECONDS, CodePilotConfig
+from codepilot.core.locking import acquire_lock, is_pid_running, release_lock
 from codepilot.core.security import validate_target_path
 from codepilot.exceptions import SecurityError, TestExecutionError
 
@@ -103,48 +105,57 @@ class FailureDetail:
         return asdict(self)
 
 
-def _is_pid_running(pid: Any) -> bool:
-    """Best-effort check whether a process id is still alive on this machine.
+class _BoundedStreamReader(threading.Thread):
+    """Drain a child pipe on a worker thread, retaining at most 'limit' bytes.
 
-    Returns True when liveness cannot be determined, so an indeterminate result is
-    treated as 'still running' and the lock is respected.
+    subprocess.communicate() buffers the child's entire output in memory before any
+    truncation can be applied, so a runaway suite printing gigabytes exhausted memory
+    before the 64 KB guard ever took effect. This reads in chunks and stops accumulating
+    once the cap is reached, while still consuming the pipe so the child never blocks on
+    a full buffer.
     """
-    try:
-        pid_int = int(pid)
-    except (TypeError, ValueError):
-        return True  # unknown owner: respect the lock
 
-    if pid_int <= 0:
-        return False
+    def __init__(self, stream: Any, limit: int = MAX_OUTPUT_BYTES) -> None:
+        super().__init__(daemon=True)
+        self._stream = stream
+        self._limit = limit
+        self._chunks: List[str] = []
+        self._retained = 0
+        self.total_bytes = 0
+        self.truncated = False
 
-    if sys.platform == "win32":
+    def run(self) -> None:
         try:
-            import ctypes
-
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            kernel32 = ctypes.windll.kernel32
-            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid_int)
-            if not handle:
-                return False
+            while True:
+                chunk = self._stream.read(8192)
+                if not chunk:
+                    break
+                self.total_bytes += len(chunk.encode("utf-8", errors="replace"))
+                if self._retained < self._limit:
+                    room = self._limit - self._retained
+                    keep = chunk[:room]
+                    self._chunks.append(keep)
+                    self._retained += len(keep)
+                    if len(keep) < len(chunk):
+                        self.truncated = True
+                else:
+                    # Keep draining so the child is never blocked by a full pipe,
+                    # but stop growing the retained buffer.
+                    self.truncated = True
+        except Exception as e:  # pragma: no cover - pipe teardown races
+            logger.debug("Stream reader stopped: %s", e)
+        finally:
             try:
-                still_active = ctypes.c_ulong()
-                if kernel32.GetExitCodeProcess(handle, ctypes.byref(still_active)):
-                    return still_active.value == 259  # STILL_ACTIVE
-                return True
-            finally:
-                kernel32.CloseHandle(handle)
-        except Exception:
-            return True
+                self._stream.close()
+            except Exception:
+                pass
 
-    try:
-        os.kill(pid_int, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists but owned by another user
-    except OSError:
-        return True
+    @property
+    def text(self) -> str:
+        body = "".join(self._chunks)
+        if self.truncated:
+            body += "\n\n[Output truncated at 64 KB by CodePilot safety guard]"
+        return body
 
 
 def _terminate_process_tree(proc: "subprocess.Popen[Any]") -> None:
@@ -176,8 +187,11 @@ def _terminate_process_tree(proc: "subprocess.Popen[Any]") -> None:
     except Exception:
         pass
 
+    # Reap the child with wait(), not communicate(): the output pipes are drained by
+    # dedicated reader threads which close them, and communicate() would then raise
+    # "I/O operation on closed file" from its own internal reader threads.
     try:
-        proc.communicate(timeout=10)
+        proc.wait(timeout=10)
     except Exception:
         pass
 
@@ -193,61 +207,23 @@ def acquire_test_lock(project_root: Path) -> Path:
     Raises:
         TestExecutionError: If another live test execution is currently running.
     """
-    root = project_root.resolve()
-    lock_file = root / TEST_LOCK_FILENAME
-    lock_file.parent.mkdir(parents=True, exist_ok=True)
-
-    if lock_file.is_file():
-        stale_reason: Optional[str] = None
-        try:
-            lock_data = json.loads(lock_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            raise TestExecutionError(
-                f"Test concurrency lock is currently held.\nLock file: '{lock_file}'"
-            )
-
-        # A lock held by a live process is respected, including this one: a lock owned by
-        # the current PID means a test run is already in progress in this process.
-        pid = lock_data.get("pid")
-        if not _is_pid_running(pid):
-            stale_reason = f"owner process (PID {pid}) is no longer running"
-
-        if stale_reason is None:
-            raise TestExecutionError(
-                f"Another test process (PID {pid}) is currently running in this repository.\n"
-                f"Lock file: '{lock_file}'"
-            )
-
-        logger.warning("Reclaiming stale test lock '%s': %s.", lock_file, stale_reason)
-        try:
-            lock_file.unlink()
-        except OSError as e:
-            raise TestExecutionError(
-                f"Stale test lock at '{lock_file}' could not be removed: {e}"
-            ) from e
-
-
-    lock_payload = {
-        "pid": os.getpid(),
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "cwd": str(root),
-    }
-    try:
-        lock_file.write_text(json.dumps(lock_payload, indent=2), encoding="utf-8")
-        return lock_file
-    except OSError as e:
-        raise TestExecutionError(f"Failed to acquire test lock: {e}") from e
+    # A lock held by a live process is respected, including one owned by the current
+    # PID: that means a test run is already in progress in this process.
+    return acquire_lock(
+        project_root,
+        TEST_LOCK_FILENAME,
+        error_factory=TestExecutionError,
+        busy_message=lambda pid, lock_file: (
+            f"Another test process (PID {pid}) is currently running in this repository.\n"
+            f"Lock file: '{lock_file}'"
+        ),
+        operation="test process",
+    )
 
 
 def release_test_lock(project_root: Path) -> None:
     """Release concurrency lock."""
-    root = project_root.resolve()
-    lock_file = root / TEST_LOCK_FILENAME
-    if lock_file.is_file():
-        try:
-            lock_file.unlink()
-        except OSError:
-            pass
+    release_lock(project_root, TEST_LOCK_FILENAME)
 
 
 def discover_project_tests(
@@ -543,18 +519,44 @@ def run_project_tests(
             **popen_kwargs,
         )
 
+        # Drain both pipes on worker threads with a hard retention cap, so output is
+        # bounded as it arrives rather than after the whole of it is already in memory.
+        stdout_reader: Optional[_BoundedStreamReader] = None
+        stderr_reader: Optional[_BoundedStreamReader] = None
+        if proc.stdout is not None:
+            stdout_reader = _BoundedStreamReader(proc.stdout)
+            stdout_reader.start()
+        if proc.stderr is not None:
+            stderr_reader = _BoundedStreamReader(proc.stderr)
+            stderr_reader.start()
+
+        def _collected(reader: Optional[_BoundedStreamReader]) -> Tuple[str, bool]:
+            if reader is None:
+                return "", False
+            reader.join(timeout=5)
+            return reader.text, reader.truncated
+
         try:
-            stdout_raw, stderr_raw = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             _terminate_process_tree(proc)
             duration = round(time.time() - start_time, 2)
+            partial_stdout, _ = _collected(stdout_reader)
+            timeout_note = (
+                f"Test command timed out after {timeout} seconds and was terminated."
+            )
+            partial_stderr, _ = _collected(stderr_reader)
+            if partial_stderr.strip():
+                timeout_note = f"{timeout_note}\n\n{partial_stderr}"
             return TestRunResult(
                 command=command,
                 passed=False,
                 exit_code=-1,
                 duration_seconds=duration,
-                stdout="",
-                stderr=f"Test command timed out after {timeout} seconds and was terminated.",
+                # Output captured before the timeout is retained: it is usually the only
+                # evidence of where the suite hung.
+                stdout=partial_stdout,
+                stderr=timeout_note,
                 summary=f"Timed out after {timeout}s",
                 timed_out=True,
             )
@@ -562,18 +564,9 @@ def run_project_tests(
         duration = round(time.time() - start_time, 2)
         passed = proc.returncode == 0
 
-        # Bounded output truncation
-        truncated = False
-        stdout_clean = stdout_raw or ""
-        stderr_clean = stderr_raw or ""
-
-        if len(stdout_clean.encode("utf-8")) > MAX_OUTPUT_BYTES:
-            stdout_clean = stdout_clean[: MAX_OUTPUT_BYTES // 2] + "\n\n[Output truncated at 64 KB by CodePilot safety guard]"
-            truncated = True
-
-        if len(stderr_clean.encode("utf-8")) > MAX_OUTPUT_BYTES:
-            stderr_clean = stderr_clean[: MAX_OUTPUT_BYTES // 2] + "\n\n[Output truncated at 64 KB by CodePilot safety guard]"
-            truncated = True
+        stdout_clean, stdout_truncated = _collected(stdout_reader)
+        stderr_clean, stderr_truncated = _collected(stderr_reader)
+        truncated = stdout_truncated or stderr_truncated
 
         summary = (
             f"Test execution succeeded in {duration}s"

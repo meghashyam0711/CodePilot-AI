@@ -247,7 +247,7 @@ def test_backups_stale_patch_and_rollback_flow(cli_runner: CliRunner, tmp_path: 
     assert "return True" in target_file.read_text(encoding="utf-8")
 
     # Rollback restores exact original content
-    rollback_res = cli_runner.invoke(app, ["rollback", "--directory", str(tmp_path)])
+    rollback_res = cli_runner.invoke(app, ["rollback", "--approved", "--directory", str(tmp_path)])
     assert rollback_res.exit_code == 0
     assert target_file.read_text(encoding="utf-8") == original_code
 

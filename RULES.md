@@ -1,10 +1,10 @@
 # CodePilot AI — Development & Safety Standards
 
-> **Permanent Operational Rules, Safety Boundaries, File Ownership Policies, and Contribution Standards**
+> **Operational Rules, Safety Boundaries, File Ownership Policies, and Contribution Standards**
 
-**Status:** Active & Mandatory  
+**Status:** Active  
 **Scope:** Repository-wide  
-**Enforcement:** Mandatory for all human contributors, maintainers, and automated agents.
+**Audience:** All contributors, maintainers, and automated workflows.
 
 ---
 
@@ -12,33 +12,33 @@
 
 1. **Preserve Existing Functionality and User Changes:**
    - Never overwrite, delete, or reformat working code without an explicit, documented reason.
-   - Respect user configurations, untracked files, and existing Git branches. Untracked files must never be assumed disposable.
-   - Verify all existing tests before proposing or applying modifications. If a change causes regressions, revert or fix immediately.
+   - Respect user configurations, untracked files, and existing Git branches. Untracked files should never be assumed disposable.
+   - Verify all existing tests before proposing or applying modifications. If a change causes regressions, revert or fix it immediately.
 
 2. **Inspect Before Modifying:**
    - Always inspect files, dependencies, ASTs, and existing project conventions before proposing or applying changes.
    - Never guess module layouts, import paths, or API signatures. Verify them directly from source code.
 
 3. **No Destructive Operations Without Explicit Approval:**
-   - Destructive operations (deleting files, resetting Git history, overwriting uncommitted edits) are strictly prohibited without explicit user approval.
-   - Destructive Git commands (`git reset --hard`, `git clean -fd`, automatic commits, forced pushes) are **strictly forbidden** under all circumstances.
+   - Destructive operations (deleting files, resetting Git history, overwriting uncommitted edits) require explicit user approval.
+   - Destructive Git commands (`git reset --hard`, `git clean -fd`, automatic commits, forced pushes) are strictly forbidden under all circumstances.
 
 4. **Truthfulness and Empirical Evidence Standards:**
-   - **Never claim a test passed unless it actually executed and returned exit code 0.**
-   - **Never claim a feature is implemented without inspecting verified, working code.**
-   - Include exact command outputs, test counts, and execution durations in status reports.
+   - Never claim a test passed unless it actually executed and returned exit code 0.
+   - Never claim a feature is implemented without inspecting verified, working code.
+   - Always include exact command outputs, test counts, and execution durations in reports.
 
 ---
 
 ## 2. Code Generation and Patch Safety
 
 1. **Zero Execution of Unvalidated Model Output:**
-   - Local or remote models must **never** be permitted to execute arbitrary shell commands directly.
+   - Local or remote models must never be permitted to execute arbitrary shell commands directly.
    - Model-generated code modifications must always be produced as standard unified Git diffs and staged in `.codepilot/patches/pending_patch.json` for developer review.
 
 2. **Mandatory Two-Stage Patch Review Flow:**
-   - *Stage 1 (Preview):* `codepilot fix --preview` generates proposed modifications and displays the unified diff with syntax highlighting. Source files **remain untouched**.
-   - *Stage 2 (Approved Apply):* `codepilot apply --approved` applies the patch **only when the developer explicitly supplies the `--approved` flag**.
+   - *Stage 1 (Preview):* `codepilot fix --preview` generates proposed modifications and displays the unified diff with syntax highlighting. Source files remain untouched.
+   - *Stage 2 (Approved Apply):* `codepilot apply --approved` applies the patch only when the developer explicitly supplies the `--approved` flag.
    - If target source files have changed between Stage 1 and Stage 2 (verified via SHA256 hashes), the patch is flagged as stale and rejected immediately.
 
 3. **Unified Diff Integrity:**
@@ -50,14 +50,14 @@
 ## 3. Hardware Resource & System Safety
 
 1. **Host Environment & Resource Boundaries:**
-   - Routine CLI commands (`scan`, `tasks`, `analyze`, `plan`) must run entirely on the CPU with **zero GPU/VRAM allocation**.
+   - Routine CLI commands (`scan`, `tasks`, `analyze`, `plan`) must run entirely on the CPU with zero GPU/VRAM allocation.
    - Maximum resident memory during static analysis must not exceed 1 GB RAM.
    - When local model inference is enabled, quantization (e.g., 4-bit GGUF) must fit within configured limits, preserving at least 1.5–2 GB VRAM headroom for display and operating system stability.
 
 2. **Prohibited System Modifications:**
-   - Do **NOT** modify hardware drivers, GPU settings, BIOS/UEFI firmware, power plans, or OS security policies.
-   - Do **NOT** alter global environment variables, system PATH entries, or registry keys without interactive user confirmation.
-   - Do **NOT** download model weights, start background daemon processes, or initiate model training without separate, explicit user authorization.
+   - Do not modify hardware drivers, GPU settings, BIOS/UEFI firmware, power plans, or OS security policies.
+   - Do not alter global environment variables, system PATH entries, or registry keys without interactive user confirmation.
+   - Do not download model weights, start background daemon processes, or initiate model training without separate, explicit user authorization.
 
 ---
 
@@ -86,7 +86,7 @@
 ## 5. Security Enclaves & Privacy Boundaries
 
 1. **Secret and Credential Protection:**
-   - Files matching `.env`, `.env.*`, `credentials.json`, `*.pem`, `*.key`, `secrets.*`, and `.git/` must **never** be scanned, logged, parsed, or included in LLM context bundles.
+   - Files matching `.env`, `.env.*`, `credentials.json`, `*.pem`, `*.key`, `secrets.*`, and `.git/` must never be scanned, logged, parsed, or included in LLM context bundles.
    - Loggers must run through the `SecretMaskingFormatter` to strip API keys, Bearer tokens, and credential hashes before writing to disk or terminal.
 
 2. **Boundary Containment & Path Traversal Guards:**
@@ -108,7 +108,7 @@
 
 ### 6.2 File Ownership Categories
 All files are classified into five explicit ownership categories before any operation:
-- **`PROJECT_MANAGED`:** Internal state, logs, locks, manifests, and patches created by CodePilot AI (located within `.codepilot/*`). CodePilot AI has explicit authorization to create, read, update, and maintain these files.
+- **`PROJECT_MANAGED`:** Internal state, logs, locks, manifests, and patches created by CodePilot AI (located within `.codepilot/*`). CodePilot AI has authorization to create, read, update, and maintain these files.
 - **`USER_OWNED`:** Application source code, tests, documentation, and user configurations. These remain user-owned at all times. CodePilot AI may read them and propose changes, but may never modify them without explicit approval (`--approved`).
 - **`GENERATED`:** Build outputs, test caches, coverage data, and compiler artifacts (`.pytest_cache`, `.coverage`, `dist`, `build`, `__pycache__`). These are regenerated by tooling rather than patched directly.
 - **`PROTECTED`:** Sensitive credentials, environment variables, private keys, VCS internals, and critical package configs (`.env*`, `credentials.json`, `*.pem`, `*.key`, `id_rsa`, `pyproject.toml`, `.git/*`, `.venv/*`). Modifications and deletions are strictly blocked. Reading credential files is strictly forbidden.
@@ -153,7 +153,7 @@ All files are classified into five explicit ownership categories before any oper
 
 1. **Project-Focused Documentation:**
    - All documentation must describe CodePilot AI itself—its architecture, requirements, design, rules, and usage.
-   - Do NOT include personal hardware specifications, personal usernames, or machine-specific local directories.
-   - Do NOT embed phase-by-phase implementation prompts or development conversation logs into product documentation.
+   - Do not include personal hardware specifications, personal usernames, or machine-specific local directories.
+   - Do not embed phase-by-phase implementation prompts or development conversation logs into product documentation.
 2. **Documentation Maintenance Policy:**
    - Any architectural change or added capability must be reflected across the documentation suite: `README.md`, `ARCHITECTURE.md`, `PRD.md`, `DESIGN.md`, `RULES.md`, `TASK.md`, `MEMORY.md`, and `CHANGELOG.md`.

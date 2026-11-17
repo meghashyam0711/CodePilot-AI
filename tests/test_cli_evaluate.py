@@ -282,7 +282,7 @@ def test_evaluate_invalid_dataset_errors(cli_runner: CliRunner, tmp_path: Path) 
 def test_evaluate_strict_mode_failure_on_unmet_targets(cli_runner: CliRunner, tmp_path: Path) -> None:
     """Verify that --strict fails with exit code 1 when target benchmark thresholds are not met."""
     failing_mock = MockModelClient(default_response="### Conversational text\nNo valid code here.")
-    with patch("codepilot.cli.create_model_client", return_value=failing_mock):
+    with patch("codepilot.cli.verify.create_model_client", return_value=failing_mock):
         result = cli_runner.invoke(
             app,
             ["evaluate", "--directory", str(tmp_path), "--provider", "mock", "--strict"],
@@ -313,7 +313,7 @@ def test_evaluate_strict_mode_success_when_all_targets_met(cli_runner: CliRunner
         return f"```python\n{exp}\n```"
 
     perfect_mock = MockModelClient(response_handler=perfect_response_handler)
-    with patch("codepilot.cli.create_model_client", return_value=perfect_mock):
+    with patch("codepilot.cli.verify.create_model_client", return_value=perfect_mock):
         patch_result = cli_runner.invoke(
             app,
             ["evaluate", "--directory", str(tmp_path), "--provider", "mock", "--strict"],
@@ -328,7 +328,7 @@ def test_evaluate_clarification_failure_detected(cli_runner: CliRunner, tmp_path
         return "```python\ndef authenticate_user(token: str) -> bool:\n    return True\n```"
 
     guessing_mock = MockModelClient(response_handler=guessing_response_handler)
-    with patch("codepilot.cli.create_model_client", return_value=guessing_mock):
+    with patch("codepilot.cli.verify.create_model_client", return_value=guessing_mock):
         result = cli_runner.invoke(
             app,
             ["evaluate", "--directory", str(tmp_path), "--provider", "mock", "--json"],

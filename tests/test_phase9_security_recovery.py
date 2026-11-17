@@ -256,7 +256,7 @@ def test_rollback_restores_original_file_contents(
     assert "return False" in test_file.read_text(encoding="utf-8")
 
     # Execute rollback
-    rollback_res = cli_runner.invoke(app, ["rollback", "--directory", str(tmp_path)])
+    rollback_res = cli_runner.invoke(app, ["rollback", "--approved", "--directory", str(tmp_path)])
     assert rollback_res.exit_code == 0
     assert "Successfully restored files from backup" in rollback_res.output
     assert "payment.py" in rollback_res.output

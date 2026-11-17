@@ -6,7 +6,7 @@ CodePilot AI is an open-source, command-line coding assistant that brings local 
 
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-585%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-610%20passed-brightgreen.svg)](tests/)
 [![Architecture](https://img.shields.io/badge/architecture-local%20first-orange.svg)](ARCHITECTURE.md)
 
 ---
@@ -40,14 +40,14 @@ CodePilot AI is an open-source, command-line coding assistant that brings local 
 
 ## Why CodePilot AI?
 
-Modern coding assistants frequently require streaming proprietary codebases to remote cloud APIs, presenting intellectual property risks for privacy-conscious developers and air-gapped enterprise environments. Furthermore, autonomous agents that modify files without review often introduce subtle regressions, break test suites, or overwrite uncommitted local work.
+Most AI coding tools stream your code to cloud APIs, which creates real intellectual property and compliance headaches if you work under NDAs, healthcare regulations, or strict company privacy policies. Worse, tools that edit files autonomously often introduce subtle bugs, break tests, or overwrite your uncommitted edits without warning.
 
-CodePilot AI is engineered around four core safety principles:
+CodePilot AI is built on four straightforward safety rules:
 
-1. **Local & Private by Default:** Inference runs completely on your machine using local model backends (Ollama or embedded standalone GGUF runtimes via `llama-cpp-python`). Your source code and credentials never leave your system.
-2. **Deterministic Repository Context:** Before proposing changes, CodePilot statically analyzes your repository to discover entry points, module dependency graphs, class hierarchies, and AST symbols, giving local models accurate context without context bloat.
-3. **Mandatory Developer Approval:** CodePilot never modifies working source files silently. Modifications are produced as standard unified Git diffs staged for inspection (`fix --preview`), and applied to disk only when you pass `--approved`.
-4. **Reversible & Safe Operations:** Automatic pre-apply backup snapshots and non-destructive rollbacks guarantee that your working directory is protected at all times. Destructive commands (`git reset --hard`, `git clean`) are strictly forbidden.
+1. **100% Local and Private:** Everything runs on your machine using Ollama or standalone GGUF models via `llama-cpp-python`. Your code, comments, and files never leave your computer.
+2. **Accurate Repository Context:** Before suggesting edits, CodePilot statically analyzes your project to find entry points, class hierarchies, imports, and symbols, so the model gets relevant context without bloated prompts.
+3. **You Always Approve Changes:** CodePilot never touches your source files without your permission. It stages suggested edits as standard unified Git diffs so you can inspect them first (`codepilot diff`), applying them only when you pass `--approved`.
+4. **Safe and Reversible:** Every approved change creates an automatic backup snapshot. If anything looks off, `codepilot rollback` restores your files instantly without running risky Git resets or clean commands.
 
 ---
 
@@ -57,31 +57,31 @@ CodePilot AI is engineered around four core safety principles:
  1. Command or Hint       2. Scan & Analyze       3. Investigate & Diff   4. Inspect Staged Diff  5. Approve & Apply      6. Test & Verify
 ┌────────────────────┐   ┌───────────────────┐   ┌───────────────────┐   ┌───────────────────┐   ┌───────────────────┐   ┌───────────────────┐
 │ codepilot fix      │──▶│ codepilot scan    │──▶│ codepilot fix     │──▶│ codepilot diff    │──▶│ codepilot apply   │──▶│ codepilot test    │
-│ file.py --issue    │   │ codepilot analyze │   │ (AST & Context    │   │ (Review candidate │   │   --approved      │   │   --approved      │
+│ file.py --issue    │   │ codepilot analyze │   │ (Context & candidate  │   │ (Review candidate │   │   --approved      │   │   --approved      │
 │ "handle zero div"  │   │ (AST & health map)│   │  diff preview)    │   │  unified patch)   │   │ (Pre-apply backup)│   │ (Safe execution)  │
 └────────────────────┘   └───────────────────┘   └───────────────────┘   └───────────────────┘   └───────────────────┘   └───────────────────┘
 ```
 
-1. **Command-Driven Initiation:** Run `codepilot fix <file> --issue "<description>"` or let CodePilot auto-target detected static code defects. Special in-code comments (`# AI-FIX:`, etc.) remain fully supported as optional hints.
-2. **Static Discovery:** CodePilot inspects the repository structure, file extensions, configuration files, test suites, and Python AST syntax health.
-3. **Investigation & Context Assembly:** CodePilot isolates the relevant code span, enclosed symbols, module imports, and sibling tests, assembling a token-budgeted prompt with strict `<untrusted_repository_context>` isolation.
-4. **Diff Preview:** The model generates a candidate solution staged as a unified diff in `.codepilot/patches/pending_patch.json`. Source files remain 100% untouched.
-5. **Approved Application:** You review the diff (`codepilot diff`) and apply it (`codepilot apply --approved`). CodePilot verifies target file checksums (preventing stale patch application) and creates an automatic backup snapshot.
-6. **Safe Verification:** Run project tests (`codepilot test --approved`) under strict timeout, concurrency, and output bounds, with optional single-turn error correction (`codepilot test --approved --fix`).
+1. **Start from the Terminal:** Run `codepilot fix <file> --issue "<description>"` or let CodePilot auto-target detected syntax errors. If you prefer annotating code directly, in-code comments (`# AI-FIX:`, etc.) work as optional hints.
+2. **Scan the Codebase:** CodePilot checks project structure, file types, config files, test directories, and Python syntax health.
+3. **Assemble Context & Investigate:** CodePilot isolates the relevant code lines, symbols, imports, and related tests, building a bounded prompt protected from prompt injection.
+4. **Preview the Diff:** The model proposes a fix staged as a unified diff in `.codepilot/patches/pending_patch.json`. Your source files remain completely untouched.
+5. **Review & Apply:** Check the diff with `codepilot diff`, then apply it with `codepilot apply --approved`. CodePilot checks file hashes to prevent overwriting recent edits and saves a backup snapshot.
+6. **Verify with Tests:** Run your test suite (`codepilot test --approved`) under strict timeout and output bounds, with optional one-turn failure repair (`codepilot test --approved --fix`).
 
 ---
 
 ## Key Features
 
-- **Command-Driven Operation:** Target specific files and issues directly from your terminal (`codepilot fix calculator.py --issue "handle division by zero"`).
-- **Comment-Free Scanning & Health Checks:** `codepilot scan` inspects repository structure, file distributions, test setups, and syntax errors without requiring special AI comments.
-- **Independent Architecture Analysis:** `codepilot analyze` maps classes, dependencies, entry points, and static defects without LLM dependency.
-- **Two-Stage Code Modification:** Guarantees that code proposals are inspected via unified diffs prior to any disk write.
-- **Automatic Recovery & Rollback:** Every patch application creates a pre-apply snapshot with cryptographic manifests. Revert changes instantly with `codepilot rollback`.
-- **Protected File Enclaves:** Strictly blocks reading or modifying sensitive files (`.env`, credentials, private keys, `pyproject.toml`, `.git/`), and redacts credentials hardcoded inside ordinary source files before any content reaches a model.
-- **Sandboxed Test Runner:** Executes pytest, npm test, cargo test, or go test with shell-injection prevention, PID locking, configurable timeouts, and 64 KB bounded output capture.
-- **Flexible Local Runtimes:** Connects to local Ollama instances or runs self-contained GGUF models directly via `llama-cpp-python` with cryptographic SHA256 integrity checks. A non-loopback endpoint is permitted but warned about, since prompts would then leave your machine.
-- **Patch Risk Screening:** Lists dangerous constructs a candidate patch would introduce (`exec`, `os.system`, `subprocess`, network calls, deserialization) by severity, so a single risky added line is never easy to miss during review.
+- **Direct Terminal Commands:** Fix specific files and describe issues right from your shell (`codepilot fix calc.py --issue "handle division by zero"`).
+- **Comment-Free Scanning:** `codepilot scan` checks file types, configurations, test folders, and syntax errors without needing any AI comments.
+- **Independent Architecture Mapping:** `codepilot analyze` maps out modules, dependencies, and entry points purely through static analysis.
+- **Two-Stage Editing:** Review proposed unified diffs first; files on disk are never modified without explicit approval.
+- **One-Command Rollback:** Every patch creates an automatic snapshot with a manifest so you can revert changes immediately with `codepilot rollback`.
+- **Protected File Enclaves:** Strictly blocks reading or modifying sensitive files (`.env`, credentials, private keys, `pyproject.toml`, `.git/`), and automatically masks credentials in source files before sending context to models.
+- **Sandboxed Test Runner:** Runs pytest, npm test, cargo test, or go test with concurrency locking, configurable timeouts, 64 KB output bounds, and shell-injection protection.
+- **Flexible Local Runtimes:** Connects to local Ollama instances or runs self-contained GGUF files directly using `llama-cpp-python` with SHA256 integrity verification.
+- **Patch Risk Screening:** Automatically inspects candidate patches for risky calls (`exec`, `eval`, `os.system`, `subprocess`, network requests) and displays warnings by severity alongside the diff.
 
 ---
 
@@ -557,7 +557,7 @@ If `codepilot fix` reports that model output contains a secret-redaction placeho
 
 ## Running Automated Tests
 
-Run the complete regression test suite (585 tests across 28 modules):
+Run the complete regression test suite (610 tests across 29 modules):
 
 ```bash
 pytest -v

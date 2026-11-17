@@ -218,15 +218,21 @@ def test_audit02_legacy_snapshot_without_applied_hash_is_not_flagged(tmp_path: P
 
 
 def test_audit02_cli_rollback_refuses_to_discard_later_edits(cli_runner: CliRunner, tmp_path: Path) -> None:
-    """'codepilot rollback' must stop rather than overwrite unsaved work."""
+    """An approved rollback must still stop rather than overwrite unsaved work.
+
+    '--approved' is passed deliberately: without it the approval gate (R-5) would reject
+    the command first and this test would pass for the wrong reason, proving nothing
+    about divergence detection.
+    """
     _staged_and_applied(tmp_path)
     target = tmp_path / "calc.py"
     kept = target.read_text(encoding="utf-8") + "\n# IMPORTANT later work\n"
     target.write_text(kept, encoding="utf-8")
 
-    result = cli_runner.invoke(app, ["rollback", "--directory", str(tmp_path)])
+    result = cli_runner.invoke(app, ["rollback", "--approved", "--directory", str(tmp_path)])
 
     assert result.exit_code == 1
+    assert "Unsaved Changes Detected" in result.output
     assert "IMPORTANT later work" in target.read_text(encoding="utf-8")
 
 
@@ -236,7 +242,9 @@ def test_audit02_cli_rollback_force_overwrites_deliberately(cli_runner: CliRunne
     target = tmp_path / "calc.py"
     target.write_text(target.read_text(encoding="utf-8") + "\n# later work\n", encoding="utf-8")
 
-    result = cli_runner.invoke(app, ["rollback", "--force", "--directory", str(tmp_path)])
+    result = cli_runner.invoke(
+        app, ["rollback", "--approved", "--force", "--directory", str(tmp_path)]
+    )
 
     assert result.exit_code == 0
     assert "# later work" not in target.read_text(encoding="utf-8")
@@ -543,10 +551,12 @@ def test_r7_test_execution_does_not_use_the_inference_timeout(tmp_path: Path) ->
     class _FakeProc:
         returncode = 0
         pid = os.getpid()
+        stdout = None
+        stderr = None
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             captured["timeout"] = timeout
-            return ("ok", "")
+            return 0
 
     monkey = pytest.MonkeyPatch()
     monkey.setattr(tester_module.subprocess, "Popen", lambda *a, **kw: _FakeProc())
@@ -569,10 +579,12 @@ def test_r7_configured_test_timeout_is_used(tmp_path: Path) -> None:
     class _FakeProc:
         returncode = 0
         pid = os.getpid()
+        stdout = None
+        stderr = None
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             captured["timeout"] = timeout
-            return ("ok", "")
+            return 0
 
     monkey = pytest.MonkeyPatch()
     monkey.setattr(tester_module.subprocess, "Popen", lambda *a, **kw: _FakeProc())
@@ -594,10 +606,12 @@ def test_r7_explicit_override_wins_over_configuration(tmp_path: Path) -> None:
     class _FakeProc:
         returncode = 0
         pid = os.getpid()
+        stdout = None
+        stderr = None
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             captured["timeout"] = timeout
-            return ("ok", "")
+            return 0
 
     monkey = pytest.MonkeyPatch()
     monkey.setattr(tester_module.subprocess, "Popen", lambda *a, **kw: _FakeProc())
@@ -646,9 +660,11 @@ def test_r7_runner_is_started_in_its_own_process_group(tmp_path: Path) -> None:
     class _FakeProc:
         returncode = 0
         pid = os.getpid()
+        stdout = None
+        stderr = None
 
-        def communicate(self, timeout=None):
-            return ("ok", "")
+        def wait(self, timeout=None):
+            return 0
 
     def _fake_popen(*args, **kwargs):
         captured.update(kwargs)

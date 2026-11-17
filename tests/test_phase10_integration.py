@@ -181,7 +181,7 @@ def test_e2e_full_workflow_lifecycle(cli_runner: CliRunner, isolated_repo: Path)
     assert res.exit_code == 0
 
     patch_id = patch_backups[0].name
-    res = cli_runner.invoke(app, ["rollback", "--patch-id", patch_id, "--directory", str(repo)])
+    res = cli_runner.invoke(app, ["rollback", "--approved", "--patch-id", patch_id, "--directory", str(repo)])
     assert res.exit_code == 0
     # Source file MUST be exactly restored to original content
     restored_math_content = (repo / "src" / "math_utils.py").read_text(encoding="utf-8")

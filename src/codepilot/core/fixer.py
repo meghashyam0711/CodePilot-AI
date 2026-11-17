@@ -19,6 +19,7 @@ import textwrap
 from typing import Any, Dict, List, Optional, Tuple
 
 from codepilot.config import CodePilotConfig
+from codepilot.core.locking import acquire_lock, release_lock
 from codepilot.core.planner import Plan
 from codepilot.core.scanner import scan_repository
 from codepilot.core.security import validate_target_path
@@ -29,6 +30,10 @@ logger = get_logger("core.fixer")
 
 PATCHES_DIR = ".codepilot/patches"
 PENDING_PATCH_FILENAME = "pending_patch.json"
+
+# Advisory lock serializing fix generation within a repository, so concurrent runs
+# cannot race on the shared pending patch bundle.
+FIX_LOCK_FILENAME = ".codepilot/fix.lock"
 
 
 @dataclass
@@ -679,6 +684,54 @@ def unwrap_nested_function_body(extracted_code: str, target_symbol: Optional[str
 
 
 def generate_preview_patch(
+    project_root: Path,
+    config: CodePilotConfig,
+    plan: Optional[Plan] = None,
+    override_provider: Optional[str] = None,
+    override_model: Optional[str] = None,
+    target_task_id: Optional[str] = None,
+    adhoc_task: Optional[Any] = None,
+) -> PatchBundle:
+    """Generate proposed code modifications and unified Git diff.
+
+    Serialized by an advisory lock. Two concurrent fix runs in the same repository both
+    write '.codepilot/patches/pending_patch.json', so without the lock the later run
+    silently overwrote the earlier one's staged patch and the developer could approve a
+    diff that no longer matched what they had reviewed.
+
+    See _generate_preview_patch_unlocked for the full contract.
+    """
+    lock_acquired = False
+    try:
+        acquire_lock(
+            project_root,
+            FIX_LOCK_FILENAME,
+            error_factory=FixError,
+            busy_message=lambda pid, lock_file: (
+                f"Another fix generation (PID {pid}) is already running in this "
+                "repository.\n"
+                "Concurrent runs would overwrite each other's staged patch, so this run "
+                "was stopped.\n"
+                f"Lock file: '{lock_file}'"
+            ),
+            operation="fix generation",
+        )
+        lock_acquired = True
+        return _generate_preview_patch_unlocked(
+            project_root,
+            config,
+            plan=plan,
+            override_provider=override_provider,
+            override_model=override_model,
+            target_task_id=target_task_id,
+            adhoc_task=adhoc_task,
+        )
+    finally:
+        if lock_acquired:
+            release_lock(project_root, FIX_LOCK_FILENAME)
+
+
+def _generate_preview_patch_unlocked(
     project_root: Path,
     config: CodePilotConfig,
     plan: Optional[Plan] = None,

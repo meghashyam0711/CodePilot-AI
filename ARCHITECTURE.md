@@ -2,7 +2,9 @@
 
 > **Architectural Specification and Component Design for Local AI-Driven Code Modification**
 
-CodePilot AI is structured as a modular, layered CLI application designed to analyze unfamiliar Git repositories via command-driven terminal workflows (with optional in-code instruction comment hints), identify static code health concerns, construct bounded model contexts, generate candidate unified Git diffs without modifying files on disk, apply validated patches under explicit developer approval, safely execute tests with concurrency locking and configurable timeouts, recover non-destructively via pre-apply backup snapshots, and provide standalone local GGUF model execution without mandatory cloud services or external daemons.
+CodePilot AI is a modular, local-first CLI tool designed to inspect and edit codebases safely. You can drive it directly from your terminal to scan project health, analyze architecture, fix specific issues, and run test suites—or leave in-code comments (`# AI-FIX:`, `# AI-TASK:`) as optional task hints.
+
+Under the hood, CodePilot isolates repository context, queries a local model (via Ollama or standalone GGUF), generates unified diffs for preview, requires explicit approval before modifying any file, and takes automatic backup snapshots so you can revert anytime with a single command.
 
 ---
 
@@ -110,7 +112,7 @@ flowchart TD
 
 ### 2.1 CLI Layer (`src/codepilot/cli.py` & `src/codepilot/core/app.py`)
 - **CLI Framework:** Built using **Typer** and styled with **Rich** terminal components.
-- **Dual Output Modality:** Every inspection and analysis command provides human-readable Rich formatting by default and machine-readable output when `--json` is supplied.
+- **Dual Output Modes:** Every command outputs human-readable Rich tables by default, and machine-readable JSON when passed `--json`.
 - **Predictable Exit Codes:** 
   - `0`: Success / clean execution.
   - `1`: System error, failed execution, or runtime exception.
@@ -118,29 +120,29 @@ flowchart TD
 - **Dynamic Diagnostics:** Coordinates system readiness checks (`codepilot doctor`) and real-time status inspection (`codepilot status`) without hardcoded state assumptions.
 
 ### 2.2 Configuration & Logging (`src/codepilot/config.py` & `src/codepilot/logging_config.py`)
-- **Pydantic v2 Schema:** Strongly-typed configuration with strict validations, defaults, and type enforcement.
+- **Pydantic v2 Schema:** Strongly typed configuration with clear validation, defaults, and type enforcement.
 - **Cascading Precedence:** Hardcoded safe defaults $\rightarrow$ `.codepilot.toml` $\rightarrow$ Environment variables (`CODEPILOT_*`) $\rightarrow$ CLI options.
-- **Secret Masking:** Formatter automatically redacts API keys, Bearer tokens, private keys, and passwords before records reach terminal or file outputs.
+- **Secret Masking:** Automatically redacts API keys, Bearer tokens, private keys, and passwords before any message reaches the terminal or log files.
 
 ### 2.3 Repository Discovery & Static Analysis (`src/codepilot/core/analyzer/` & `src/codepilot/core/scanner.py`)
-- **Discovery Engine (`discovery.py`):** Traverses repositories honoring `.gitignore`, ignoring build caches, virtual environments, and binary files.
-- **Project Structure & Health Scanner (`scanner.py`):** In addition to optional comment scanning, discovers file extension distributions, configuration files, test directories, skipped files with exclusion reasons, and performs AST-based static defect detection (syntax errors, empty files) without requiring comments.
+- **Discovery Engine (`discovery.py`):** Traverses the repository honoring `.gitignore` rules while ignoring build caches, virtual environments, and binary files.
+- **Project Structure & Health Scanner (`scanner.py`):** Discovers file extension distributions, configuration files, test directories, and skipped files (with reasons). Also detects static Python AST defects (such as syntax errors and empty files) without requiring comments.
 - **AST Symbol Extractors (`extractors/python.py`, `extractors/generic.py`):** Extracts modules, imports, classes, methods, functions, docstrings, and decorators using Python's standard `ast` module, falling back to regex patterns for non-Python sources.
-- **Entry Point Detector (`entry_points.py`):** Scores and ranks executable scripts, CLI dispatchers, and WSGI/ASGI application instances.
-- **Relationship Mapper (`relationships.py`):** Resolves intra-project import graphs and class inheritance hierarchies.
-- **Context Builder (`context_builder.py`):** Formats token-budgeted prompt context for consumption by local models.
+- **Entry Point Detector (`entry_points.py`):** Scores and ranks executable scripts, CLI dispatchers, and WSGI/ASGI web application entry points.
+- **Relationship Mapper (`relationships.py`):** Resolves project import graphs and class inheritance hierarchies.
+- **Context Builder (`context_builder.py`):** Prepares token-budgeted prompt context for local models.
 
 ### 2.4 AI Instruction Comment Engine (`src/codepilot/core/parser/`)
-- **Optional Task Hints:** Special instruction comments (`# AI-FIX:`, `# AI-TASK:`, `# AI-REFACTOR:`, `# AI-TEST:`, `# AI-DOCS:`) provide optional in-code task hints, but are completely optional. Ordinary scanning, analysis, and fix workflows operate independently of comments.
+- **Optional Task Hints:** In-code instruction comments (`# AI-FIX:`, `# AI-TASK:`, `# AI-REFACTOR:`, `# AI-TEST:`, `# AI-DOCS:`) provide optional hints when reading code. Standard scanning, analysis, and fix commands work completely independently of comments.
 - **Multi-Language Adapters (`adapters.py`):** Extensible adapter architecture supporting Python (`#`), C/C++/Java/JS/TS/Go/Rust (`//`, `/* ... */`), HTML/XML (`<!-- ... -->`), and SQL (`--`).
-- **Token-Level Parser (`comment_parser.py`):** Utilizes Python standard `tokenize` on source bytes. Guarantees that string literals and docstrings containing instruction keywords are never treated as comments.
-- **AST Symbol Resolver (`symbol_resolver.py`):** Resolves instructions to their preceding definitions ($\le 2$ lines, accounting for decorators) or enclosing blocks, associating target symbols (`calculate_total`, `Client.connect`) with task records.
-- **Supported Instruction Types:** `AI-FIX`, `AI-TASK`, `AI-REFACTOR`, `AI-TEST`, `AI-DOCS`.
+- **Token-Level Parser (`comment_parser.py`):** Uses Python's standard `tokenize` module on source bytes. String literals and docstrings containing instruction keywords are never treated as comments.
+- **AST Symbol Resolver (`symbol_resolver.py`):** Associates instructions with preceding definitions ($\le 2$ lines, accounting for decorators) or enclosing blocks, linking symbols (`calculate_total`, `Client.connect`) to task records.
+- **Supported Instruction Types:** `AI-FIX`, `AI-TASK`, `AI-REFACTOR`, `AI-TEST`, and `AI-DOCS`.
 
 ### 2.5 Context & Prompt Assembly (`src/codepilot/core/context/`)
-- **Context Engine (`engine.py`):** Assembles relevant code spans around target symbols, associated module imports, and sibling unit test suites (`tests/test_<stem>.py`).
-- **Defensive Secret Exclusion:** Rejects sensitive paths (`.env`, credentials, private keys), setting `bundle.is_safe = False`.
-- **Token Budgeting:** Accurately estimates token counts (~4 chars/token) and gracefully trims auxiliary context to stay strictly within `max_context_tokens`.
+- **Context Engine (`engine.py`):** Assembles code spans around target symbols, associated module imports, and sibling unit test suites (`tests/test_<stem>.py`).
+- **Protecting Sensitive Files:** Rejects sensitive paths (`.env`, credentials, private keys), setting `bundle.is_safe = False`.
+- **Token Budgeting:** Estimates token counts (~4 chars/token) and gracefully trims auxiliary context to stay strictly within `max_context_tokens`.
 - **Prompt Construction (`prompt.py`):** Versioned template (`v1.0.0`) encapsulating all repository snippets within `<untrusted_repository_context>` blocks with system instructions treating enclosed code strictly as passive data.
 
 ### 2.6 Modular Model Runtime (`src/codepilot/core/models/`)
