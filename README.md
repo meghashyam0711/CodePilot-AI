@@ -6,7 +6,7 @@ CodePilot AI is an open-source, command-line coding assistant that brings local 
 
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-404%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-585%20passed-brightgreen.svg)](tests/)
 [![Architecture](https://img.shields.io/badge/architecture-local%20first-orange.svg)](ARCHITECTURE.md)
 
 ---
@@ -78,9 +78,10 @@ CodePilot AI is engineered around four core safety principles:
 - **Independent Architecture Analysis:** `codepilot analyze` maps classes, dependencies, entry points, and static defects without LLM dependency.
 - **Two-Stage Code Modification:** Guarantees that code proposals are inspected via unified diffs prior to any disk write.
 - **Automatic Recovery & Rollback:** Every patch application creates a pre-apply snapshot with cryptographic manifests. Revert changes instantly with `codepilot rollback`.
-- **Protected File Enclaves:** Strictly blocks reading or modifying sensitive files (`.env`, credentials, private keys, `pyproject.toml`, `.git/`).
+- **Protected File Enclaves:** Strictly blocks reading or modifying sensitive files (`.env`, credentials, private keys, `pyproject.toml`, `.git/`), and redacts credentials hardcoded inside ordinary source files before any content reaches a model.
 - **Sandboxed Test Runner:** Executes pytest, npm test, cargo test, or go test with shell-injection prevention, PID locking, configurable timeouts, and 64 KB bounded output capture.
-- **Flexible Local Runtimes:** Connects to local Ollama instances or runs self-contained GGUF models directly via `llama-cpp-python` with cryptographic SHA256 integrity checks.
+- **Flexible Local Runtimes:** Connects to local Ollama instances or runs self-contained GGUF models directly via `llama-cpp-python` with cryptographic SHA256 integrity checks. A non-loopback endpoint is permitted but warned about, since prompts would then leave your machine.
+- **Patch Risk Screening:** Lists dangerous constructs a candidate patch would introduce (`exec`, `os.system`, `subprocess`, network calls, deserialization) by severity, so a single risky added line is never easy to miss during review.
 
 ---
 
@@ -125,6 +126,8 @@ Run the built-in diagnostic doctor to verify your environment:
 codepilot doctor
 codepilot status
 ```
+
+`codepilot doctor` runs 8 checks across the Python runtime, dependencies, Git, configuration, filesystem access, security boundaries and the model runtime. The model-runtime check **actually probes the configured backend** — it connects to the Ollama daemon and confirms the configured model is installed, or verifies the GGUF file — so a provider name alone is never reported as a working runtime. Non-critical problems are reported as `WARN` and summarized as *"Healthy (with warnings)"* rather than claiming the environment meets every requirement.
 
 ---
 
@@ -240,6 +243,29 @@ Whenever a fix is requested, CodePilot presents an **Investigation & Proposed Fi
 
 **Safety Guarantee:** `codepilot fix` **never modifies source files on disk**. It generates a candidate unified Git diff and stages it in `.codepilot/patches/pending_patch.json`.
 
+**Security Review of the Candidate Patch:**
+Alongside the diff, CodePilot lists any risky construct the patch would *introduce* that was not in the original file — ranked by severity, with the exact line:
+
+```
+│ Severity │ File     │ Line │ Finding                          │
+├──────────┼──────────┼──────┼──────────────────────────────────┤
+│ HIGH     │ calc.py  │    6 │ 'os.system' runs a shell command │
+```
+
+`HIGH` covers code and command execution (`exec`, `eval`, `os.system`, `subprocess`); `MEDIUM` covers network access, `pickle`/`yaml` deserialization and dynamic imports; `LOW` covers destructive filesystem calls. Constructs already present in the file are not reported, since they are not the patch's doing. This is **advisory** — the patch is still staged, and nothing reaches disk until you run `apply --approved`.
+
+**Partially Completed Runs:**
+If one task's model output is unusable, that task is skipped rather than discarding the whole run. The successful work is staged, the run reports `partial_success`, and the skipped tasks are listed with the reason:
+
+```
+│ Task     │ File │ Reason                                            │
+├──────────┼──────┼───────────────────────────────────────────────────┤
+│ TASK-002 │ m.py │ Model output for AI-DOCS task ... does not        │
+│          │      │ contain a valid docstring or comments             │
+```
+
+Re-run `codepilot fix` targeting a skipped task to retry it. Output-format failures are common with very small models and usually resolve with a larger one. If *every* task fails, no patch is staged and the command exits with an error.
+
 ---
 
 ### 4. Reviewing Proposed Diffs (`codepilot diff`)
@@ -254,7 +280,7 @@ codepilot diff
 codepilot diff --json
 ```
 
-The diff shows exact additions (`+`) and deletions (`-`), target file paths, and cryptographic SHA256 checksums.
+The diff shows exact additions (`+`) and deletions (`-`), target file paths, and cryptographic SHA256 checksums. The security review and any skipped tasks are re-displayed here too, so reviewing a patch in a later session gives you the same warnings as when it was generated.
 
 ---
 
@@ -289,9 +315,23 @@ codepilot rollback
 
 # Roll back a specific patch by ID
 codepilot rollback --patch-id patch-b1a0364a11f2
+
+# Roll back even though you edited the file after applying the patch
+codepilot rollback --force
 ```
 
 Rollbacks restore files byte-for-byte from backup manifests without running destructive Git commands (`git reset --hard` and `git clean` are strictly forbidden).
+
+**Protection for edits made after a patch was applied.** A snapshot records both the pre-patch content and the content the patch wrote. If you have since edited one of those files yourself, restoring the snapshot would silently discard that work, so CodePilot stops and names the affected files:
+
+```
+Rollback stopped to protect your changes.
+These file(s) were modified after patch patch-b1a0364a11f2 was applied.
+Restoring the backup would discard those edits:
+  • src/calculator.py
+```
+
+Commit or save your work first, or pass `--force` to overwrite it deliberately.
 
 ---
 
@@ -317,9 +357,11 @@ codepilot test --approved --fix
 ```
 
 **Safety Controls:**
-- **Concurrency Locking:** Acquires `.codepilot/test.lock` with PID tracking to prevent overlapping test executions.
+- **Concurrency Locking:** Acquires `.codepilot/test.lock` with PID tracking to prevent overlapping test executions. A lock left behind by a crashed or killed run is detected (its owner process is no longer alive) and reclaimed automatically, so an interrupted run never blocks the repository permanently.
+- **Timeout:** Bounded by `test_timeout` (default **900 s**), or `--timeout` for a one-off override. This is deliberately *separate* from `request_timeout`, which bounds model inference only — a test suite routinely runs far longer than a model call.
+- **Process-Tree Termination:** On timeout the runner is killed together with everything it spawned (test workers, servers started by tests), so no orphaned processes survive.
 - **Stream Bounds:** Captures up to 64 KB of output to prevent terminal freeze or buffer overflows.
-- **Shell Injection Prevention:** Rejects chained operators (`;`, `&&`, `||`, `|`, `$()`).
+- **Shell Injection Prevention:** Rejects chained operators (`;`, `&&`, `||`, `|`, `$()`), and runs the command without a shell. Approved runner names must match at a token boundary, so an executable merely *beginning* with an approved name (e.g. `pytest_something`) is rejected.
 
 ---
 
@@ -394,7 +436,14 @@ log_level = "INFO"
 model_provider = "ollama"
 model_id = "qwen2.5-coder:1.5b"
 
+# Timeout for a single model inference call, in seconds
 request_timeout = 30.0
+
+# Timeout for executing the project's test suite, in seconds.
+# Separate from 'request_timeout' above: test suites routinely run far longer than
+# a model call. Defaults to 900 (15 minutes) when unset.
+# test_timeout = 900
+
 max_context_tokens = 2048
 max_input_size = 100000
 require_approval = true
@@ -434,7 +483,14 @@ protected_directories = [
 3. **Protected File Enclaves:** Reading or modifying credentials, private keys, `.env`, `.git/`, or build configs is rejected with `SecurityError`.
 4. **Path Traversal Protection:** Canonical absolute paths are verified via `pathlib.Path.resolve()`, strictly blocking directory traversal (`../../`) and symlink escapes.
 5. **No Shell Execution of LLM Code:** Local models cannot run arbitrary shell commands.
-6. **AST Invariance for Documentation Tasks:** For `AI-DOCS` tasks, candidate patches are stripped of docstrings and compared against the original AST. If executable statements, control flow, or signatures differ, the patch is rejected.
+6. **AST Invariance for Documentation Tasks:** For files whose tasks are *all* `AI-DOCS`, candidate patches are stripped of docstrings and compared against the original AST. If executable statements, control flow, or signatures differ, the patch is rejected. Files that also carry `AI-FIX`/`AI-TASK` work are exempt, since they are expected to change executable code.
+7. **Secret Redaction Before Inference:** Credential *files* are never read, and hardcoded credentials found inside ordinary source files are redacted before the content is placed in a prompt. Redaction preserves line numbering and leaves placeholders, `os.environ[...]` indirections and short values untouched, so the model still receives workable code. If a model echoes a redaction placeholder back, the patch is rejected rather than overwriting your real credential with mask text.
+8. **Risk Screening of Generated Patches:** Candidate patches are inspected for constructs they would *introduce* — `exec`, `eval`, `os.system`, the `subprocess` family, network calls, `pickle` deserialization, recursive deletes — and these are listed by severity alongside the diff. Screening is advisory: it never blocks a patch, because you remain the decision maker.
+9. **Partial Results Instead of Total Loss:** If one task's model output is unusable, that task is skipped and reported while the remaining tasks are staged normally. A run reports `partial_success` and names every skipped task, so a patch never silently covers less than you asked for.
+
+### Local-Only Inference
+
+Inference runs against a local runtime: an Ollama daemon on `localhost` or an embedded GGUF model. If you point `ollama_base_url` at a non-loopback address, CodePilot **permits it but warns**, in the log and in `codepilot doctor`, because repository source code in prompts would then leave your machine. It is not silently blocked, so remote runtimes remain available by deliberate choice.
 
 ---
 
@@ -475,11 +531,33 @@ If `codepilot apply --approved` rejects a patch with a stale checksum error:
 - The target file was modified after `codepilot fix` generated the candidate diff.
 - Run `codepilot fix` again to generate a fresh diff against the updated file content.
 
+### Test Suite Times Out
+If `codepilot test --approved` reports a timeout before your suite finishes:
+- Raise `test_timeout` in `.codepilot.toml` (default 900 s), or pass `--timeout <seconds>` for one run.
+- Do **not** raise `request_timeout` — that setting bounds model inference only and has no effect on test execution.
+
+### Rollback Stopped To Protect Changes
+If `codepilot rollback` refuses and lists files:
+- You edited those files after the patch was applied, and restoring the snapshot would discard that work.
+- Commit or save the edits, then roll back; or pass `--force` to overwrite them deliberately.
+
+### Tasks Were Skipped
+If `codepilot fix` reports `partial_success` and lists skipped tasks:
+- The staged patch is valid but covers only the tasks that succeeded.
+- Read the stated reason per task. Output-format failures (for example an `AI-DOCS` task that returned code instead of a docstring) are common with very small models and usually resolve with a larger one.
+- Re-run `codepilot fix --task-id <TASK-ID>` to retry an individual task.
+
+### Secret Redaction Placeholder Rejected
+If `codepilot fix` reports that model output contains a secret-redaction placeholder:
+- The target file holds a hardcoded credential, which was masked before being sent to the model, and the model echoed the mask back.
+- Applying it would overwrite your real credential with placeholder text, so the patch was refused.
+- Move the credential into an environment variable and retry.
+
 ---
 
 ## Running Automated Tests
 
-Run the complete regression test suite (404 tests across 26 modules):
+Run the complete regression test suite (585 tests across 28 modules):
 
 ```bash
 pytest -v
@@ -494,6 +572,9 @@ pytest tests/test_phase10_integration.py -v
 pytest tests/test_ownership_root.py -v
 pytest tests/test_phase9_security_recovery.py -v
 pytest tests/test_context_engine.py -v
+pytest tests/test_secret_redaction.py -v
+pytest tests/test_patch_risk.py -v
+pytest tests/test_partial_patches.py -v
 ```
 
 ---

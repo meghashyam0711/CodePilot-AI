@@ -70,6 +70,13 @@ DEFAULT_PROTECTED_DIRECTORIES = [
 
 CONFIG_FILENAME = ".codepilot.toml"
 
+# Default wall-clock budget for executing a project's test suite.
+#
+# Test execution is deliberately NOT bounded by 'request_timeout': that setting exists to
+# bound a single model inference call (default 30s), and reusing it here killed any real
+# test suite that ran longer than the LLM budget.
+DEFAULT_TEST_TIMEOUT_SECONDS = 900.0
+
 
 class CodePilotConfig(BaseSettings):
     """CodePilot configuration schema and validator."""
@@ -119,7 +126,17 @@ class CodePilotConfig(BaseSettings):
         default=30.0,
         gt=0,
         le=3600.0,
-        description="Request timeout in seconds.",
+        description="Model inference request timeout in seconds.",
+    )
+    test_timeout: Optional[float] = Field(
+        default=None,
+        gt=0,
+        le=86400.0,
+        description=(
+            "Timeout in seconds for project test execution. Independent of "
+            "'request_timeout', which bounds model inference only. Defaults to "
+            "DEFAULT_TEST_TIMEOUT_SECONDS when unset."
+        ),
     )
     max_input_size: int = Field(
         default=100_000,
@@ -229,8 +246,13 @@ model_provider = "none"
 # Optional specific model identifier
 model_id = ""
 
-# Request timeout in seconds
+# Model inference request timeout in seconds
 request_timeout = 30.0
+
+# Timeout in seconds for executing the project's test suite.
+# This is separate from 'request_timeout' above, which bounds model inference only.
+# Uncomment to override the default of {DEFAULT_TEST_TIMEOUT_SECONDS:.0f} seconds.
+# test_timeout = {DEFAULT_TEST_TIMEOUT_SECONDS:.0f}
 
 # Maximum input size in bytes
 max_input_size = 100000

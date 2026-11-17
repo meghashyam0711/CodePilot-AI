@@ -49,6 +49,9 @@ htmlcov/
 .codepilot/
 *.log
 
+# Scratch directories from manual validation runs (evidence is kept in reports/)
+temp_*/
+
 
 # Local configuration & environment
 .env

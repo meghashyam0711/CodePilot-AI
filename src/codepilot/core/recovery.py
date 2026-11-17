@@ -6,6 +6,7 @@ of modified files without destructive Git operations or loss of untracked files.
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,18 +24,27 @@ MANIFEST_FILENAME = "manifest.json"
 
 @dataclass
 class BackupEntry:
-    """Record of a single backed-up file."""
+    """Record of a single backed-up file.
+
+    'original_hash' is the SHA256 of the file *before* the patch was applied (the
+    content held in the backup copy). 'applied_hash' is the SHA256 of the content the
+    patch was about to write, which lets rollback detect whether the developer edited
+    the file again after the patch was applied and avoid silently discarding that work.
+    It is optional so that snapshots written by earlier versions still load.
+    """
 
     file_path: str
     backup_file: str
     original_hash: str
+    applied_hash: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BackupEntry":
-        return cls(**data)
+        known = {f for f in ("file_path", "backup_file", "original_hash", "applied_hash")}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 @dataclass
@@ -132,6 +142,13 @@ def create_patch_backup(
 
         dest_file.parent.mkdir(parents=True, exist_ok=True)
 
+        proposed = getattr(fp, "proposed_content", None)
+        applied_hash = (
+            hashlib.sha256(proposed.encode("utf-8")).hexdigest()
+            if isinstance(proposed, str)
+            else None
+        )
+
         try:
             shutil.copy2(target_path, dest_file)
             entries.append(
@@ -139,6 +156,7 @@ def create_patch_backup(
                     file_path=fp.file_path,
                     backup_file=candidate_rel,
                     original_hash=fp.original_hash,
+                    applied_hash=applied_hash,
                 )
             )
             logger.info("Created backup for '%s' at '%s'", fp.file_path, dest_file)
@@ -184,21 +202,91 @@ def list_backups(project_root: Path) -> List[Dict[str, Any]]:
     return results
 
 
+def resolve_backup_manifest(
+    project_root: Path,
+    patch_id: Optional[str] = None,
+) -> BackupManifest:
+    """Select the backup snapshot that a rollback would restore.
+
+    Args:
+        project_root: Repository root.
+        patch_id: Optional specific patch ID. If None, selects the most recent snapshot.
+
+    Raises:
+        RecoveryError: If no snapshots exist or the requested patch ID is unknown.
+    """
+    root = project_root.resolve()
+    backups = list_backups(root)
+
+    if not backups:
+        raise RecoveryError("No backup snapshots found in '.codepilot/backups'. Cannot rollback.")
+
+    if patch_id:
+        clean_id = patch_id.strip()
+        for b in backups:
+            if b.get("patch_id") == clean_id or clean_id in b.get("patch_id", ""):
+                return BackupManifest.from_dict(b)
+        raise RecoveryError(f"Backup snapshot for patch ID '{patch_id}' not found.")
+
+    return BackupManifest.from_dict(backups[0])
+
+
+def detect_post_apply_divergence(
+    project_root: Path,
+    manifest: BackupManifest,
+) -> List[str]:
+    """Return snapshot files that were edited after the patch was applied.
+
+    Restoring such a file would discard work the developer did since the patch landed.
+    Files still holding exactly what the patch wrote, files already back in their
+    pre-patch state, and snapshots from older versions that recorded no applied state are
+    all reported as safe to restore.
+    """
+    root = project_root.resolve()
+    diverged: List[str] = []
+
+    for entry in manifest.files:
+        if not entry.applied_hash:
+            continue  # legacy snapshot: no applied-state record to compare against
+        target = root / entry.file_path
+        if not target.is_file():
+            continue
+        try:
+            current = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        current_hash = hashlib.sha256(current.encode("utf-8")).hexdigest()
+        if current_hash in (entry.applied_hash, entry.original_hash):
+            continue
+        diverged.append(entry.file_path)
+
+    return diverged
+
+
 def rollback_patch(
     project_root: Path,
     patch_id: Optional[str] = None,
+    force: bool = False,
 ) -> RecoveryResult:
     """Restore target files from a previously created pre-apply backup snapshot.
+
+    This is the recovery primitive: it restores the snapshot unconditionally, which is
+    what makes it usable to repair files that were damaged after a patch was applied.
+    Callers that act on a developer's behalf should first consult
+    detect_post_apply_divergence() so later hand-written work is not discarded without
+    the developer knowing.
 
     Args:
         project_root: Repository root.
         patch_id: Optional specific patch ID to restore. If None, restores the latest backup.
+        force: Accepted for interface symmetry with callers that gate on divergence; this
+            function always restores.
 
     Returns:
         RecoveryResult: Restored file list and timestamp.
 
     Raises:
-        RecoveryError: If no backups exist, manifest is missing, or restore write fails.
+        RecoveryError: If no backups exist, a manifest is missing, or a restore write fails.
     """
     root = project_root.resolve()
     backups = list_backups(root)

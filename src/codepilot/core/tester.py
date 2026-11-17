@@ -11,12 +11,13 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from codepilot.config import CodePilotConfig
+from codepilot.config import DEFAULT_TEST_TIMEOUT_SECONDS, CodePilotConfig
 from codepilot.core.security import validate_target_path
 from codepilot.exceptions import SecurityError, TestExecutionError
 
@@ -102,28 +103,128 @@ class FailureDetail:
         return asdict(self)
 
 
+def _is_pid_running(pid: Any) -> bool:
+    """Best-effort check whether a process id is still alive on this machine.
+
+    Returns True when liveness cannot be determined, so an indeterminate result is
+    treated as 'still running' and the lock is respected.
+    """
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return True  # unknown owner: respect the lock
+
+    if pid_int <= 0:
+        return False
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid_int)
+            if not handle:
+                return False
+            try:
+                still_active = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(still_active)):
+                    return still_active.value == 259  # STILL_ACTIVE
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True
+
+    try:
+        os.kill(pid_int, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by another user
+    except OSError:
+        return True
+
+
+def _terminate_process_tree(proc: "subprocess.Popen[Any]") -> None:
+    """Terminate a timed-out test runner together with every process it spawned.
+
+    Killing only the direct child leaves grandchildren (test workers, servers started by
+    the suite) running and holding the captured pipes open. Best effort: any failure falls
+    back to killing the direct child so a timeout always returns.
+    """
+    try:
+        if sys.platform == "win32":
+            # taskkill walks the tree; the process was started in its own process group.
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    except Exception as e:  # pragma: no cover - platform dependent
+        logger.debug("Process-tree termination failed for PID %s: %s", proc.pid, e)
+
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+    try:
+        proc.communicate(timeout=10)
+    except Exception:
+        pass
+
+
 def acquire_test_lock(project_root: Path) -> Path:
     """Acquire concurrency lock to prevent simultaneous test runs.
 
+    A lock whose recorded owner process is no longer alive is stale -- it is left behind
+    when a test run is killed or crashes -- and is reclaimed automatically. Without this,
+    a single interrupted run blocked 'codepilot test' in the repository permanently and
+    could only be cleared by deleting the lock file by hand.
+
     Raises:
-        TestExecutionError: If another test execution is currently running.
+        TestExecutionError: If another live test execution is currently running.
     """
     root = project_root.resolve()
     lock_file = root / TEST_LOCK_FILENAME
     lock_file.parent.mkdir(parents=True, exist_ok=True)
 
     if lock_file.is_file():
+        stale_reason: Optional[str] = None
         try:
             lock_data = json.loads(lock_file.read_text(encoding="utf-8"))
-            pid = lock_data.get("pid")
+        except (json.JSONDecodeError, OSError):
+            raise TestExecutionError(
+                f"Test concurrency lock is currently held.\nLock file: '{lock_file}'"
+            )
+
+        # A lock held by a live process is respected, including this one: a lock owned by
+        # the current PID means a test run is already in progress in this process.
+        pid = lock_data.get("pid")
+        if not _is_pid_running(pid):
+            stale_reason = f"owner process (PID {pid}) is no longer running"
+
+        if stale_reason is None:
             raise TestExecutionError(
                 f"Another test process (PID {pid}) is currently running in this repository.\n"
                 f"Lock file: '{lock_file}'"
             )
-        except json.JSONDecodeError:
+
+        logger.warning("Reclaiming stale test lock '%s': %s.", lock_file, stale_reason)
+        try:
+            lock_file.unlink()
+        except OSError as e:
             raise TestExecutionError(
-                f"Test concurrency lock is currently held.\nLock file: '{lock_file}'"
-            )
+                f"Stale test lock at '{lock_file}' could not be removed: {e}"
+            ) from e
 
 
     lock_payload = {
@@ -289,13 +390,25 @@ def validate_test_command(command: str) -> None:
                 "To prevent command injection, chained commands are not permitted."
             )
 
-    # Ensure command uses an approved test runner prefix
+    # Ensure command uses an approved test runner prefix.
+    #
+    # The prefix must end at a token boundary. A bare startswith() match also accepted
+    # commands such as 'pytest_evil_binary' or 'go testsomething', letting an untrusted
+    # '.codepilot.toml' name an arbitrary executable that merely begins with an
+    # approved runner name.
     normalized = trimmed.lower()
     exec_clean = sys.executable.lower().strip('"')
+
+    def _matches_prefix(text: str, prefix: str) -> bool:
+        if not text.startswith(prefix):
+            return False
+        rest = text[len(prefix):]
+        return rest == "" or rest[0].isspace()
+
     is_approved = (
-        any(normalized.startswith(runner.lower()) for runner in APPROVED_TEST_RUNNERS)
-        or normalized.startswith(exec_clean)
-        or normalized.startswith(f'"{exec_clean}"')
+        any(_matches_prefix(normalized, runner.lower()) for runner in APPROVED_TEST_RUNNERS)
+        or _matches_prefix(normalized, exec_clean)
+        or _matches_prefix(normalized, f'"{exec_clean}"')
     )
 
     if not is_approved:
@@ -387,7 +500,14 @@ def run_project_tests(
     acquire_test_lock(root)
 
     start_time = time.time()
-    timeout = timeout_override or config.request_timeout
+    # Test execution has its own budget. 'request_timeout' bounds a single model inference
+    # call (default 30s); using it here terminated any legitimate test suite that ran
+    # longer than the LLM budget.
+    timeout = (
+        timeout_override
+        or getattr(config, "test_timeout", None)
+        or DEFAULT_TEST_TIMEOUT_SECONDS
+    )
 
     try:
         raw_args = (
@@ -400,6 +520,18 @@ def run_project_tests(
             for arg in raw_args
         ]
 
+        # Launch the runner in its own process group / job object so that a timeout can
+        # terminate the whole tree. proc.kill() alone only reaps the direct child, leaving
+        # orphaned grandchildren (pytest-xdist workers, dev servers started by tests)
+        # running and still holding the captured pipes.
+        popen_kwargs: Dict[str, Any] = {}
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+
         proc = subprocess.Popen(
             cmd_args,
             cwd=str(root),
@@ -408,13 +540,13 @@ def run_project_tests(
             text=True,
             encoding="utf-8",
             errors="replace",
+            **popen_kwargs,
         )
 
         try:
             stdout_raw, stderr_raw = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
+            _terminate_process_tree(proc)
             duration = round(time.time() - start_time, 2)
             return TestRunResult(
                 command=command,

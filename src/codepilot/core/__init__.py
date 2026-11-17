@@ -68,6 +68,7 @@ from codepilot.core.security import (
     classify_file_ownership,
     is_binary_file,
     is_protected_file,
+    redact_secrets_for_context,
     resolve_project_root,
     sanitize_filename,
     sanitize_log_output,
@@ -80,6 +81,12 @@ from codepilot.core.recovery import (
     create_patch_backup,
     list_backups,
     rollback_patch,
+)
+from codepilot.core.patch_risk import (
+    RiskFinding,
+    RiskSeverity,
+    screen_file_change,
+    summarize_risk,
 )
 from codepilot.core.test_analyzer import (
     FailureAnalysisReport,
@@ -138,6 +145,8 @@ __all__ = [
     "ProjectStatus",
     "RelatedContext",
     "ResolvedSymbol",
+    "RiskFinding",
+    "RiskSeverity",
     "ScanResult",
     "SymbolResolver",
     "TaskContextBuilder",
@@ -159,8 +168,11 @@ __all__ = [
     "load_scan_result",
     "parse_file",
     "parse_repository",
+    "redact_secrets_for_context",
     "run_project_tests",
     "sanitize_filename",
+    "screen_file_change",
+    "summarize_risk",
     "save_plan",
     "save_scan_result",
     "scan_repository",

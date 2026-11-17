@@ -19,7 +19,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from rich.console import Console
 from rich.markup import escape
@@ -66,7 +66,12 @@ from codepilot.core.parser import (
 )
 from codepilot.core.patcher import apply_approved_patch
 from codepilot.core.planner import generate_plan, load_plan, save_plan
-from codepilot.core.recovery import list_backups, rollback_patch
+from codepilot.core.recovery import (
+    detect_post_apply_divergence,
+    list_backups,
+    resolve_backup_manifest,
+    rollback_patch,
+)
 from codepilot.core.scanner import (
     SOURCE_EXTENSIONS,
     load_scan_result,
@@ -102,6 +107,125 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+
+def _render_skipped_tasks(patch_bundle: Any) -> int:
+    """Report tasks that produced no usable change, so a partial run is never silent.
+
+    A patch that covers only some of the requested tasks must say so: the developer would
+    otherwise apply it believing every task had been handled. Returns the failure count.
+    """
+    failures = list(getattr(patch_bundle, "task_failures", []) or [])
+    if not failures:
+        return 0
+
+    table = Table(
+        title="Skipped Tasks — No Usable Change Produced",
+        show_header=True,
+        header_style="bold yellow",
+    )
+    table.add_column("Task", style="cyan", min_width=10)
+    table.add_column("File", style="cyan", min_width=14)
+    table.add_column("Reason", min_width=44)
+
+    for failure in failures:
+        reason = " ".join(str(failure.get("reason", "")).split())
+        if len(reason) > 300:
+            reason = reason[:297] + "..."
+        table.add_row(
+            escape(str(failure.get("task_id", "-"))),
+            escape(str(failure.get("file_path", "-"))),
+            escape(reason),
+        )
+
+    err_console.print(table)
+    applied = len(getattr(patch_bundle, "file_patches", []) or [])
+    err_console.print(
+        Panel(
+            f"[bold]{len(failures)} task(s) were skipped[/bold] and are NOT part of this patch.\n"
+            f"The remaining work was staged normally across {applied} file(s).\n\n"
+            "[dim]Re-run 'codepilot fix' targeting a skipped task to retry it, or address "
+            "the reason above first. A larger local model usually resolves output-format "
+            "failures.[/dim]",
+            title="[bold yellow]Partially Completed[/bold yellow]",
+            border_style="yellow",
+        )
+    )
+    return len(failures)
+
+
+def _render_patch_risk_warning(patch_bundle: Any) -> int:
+    """Print a security notice for risky constructs a patch introduces.
+
+    The two-stage approval model assumes the developer reads the diff, but a single added
+    line that shells out or evaluates a string is easy to miss. This surfaces those lines
+    explicitly wherever a patch is shown. Returns the number of findings reported.
+    """
+    rows: List[Tuple[str, Dict[str, Any]]] = []
+    for fp in getattr(patch_bundle, "file_patches", []) or []:
+        for finding in getattr(fp, "risk_findings", []) or []:
+            rows.append((fp.file_path, finding))
+
+    if not rows:
+        return 0
+
+    severity_styles = {"HIGH": "bold red", "MEDIUM": "bold yellow", "LOW": "cyan"}
+    has_high = any(f.get("severity") == "HIGH" for _, f in rows)
+
+    table = Table(
+        title="Security Review — Constructs Introduced By This Patch",
+        show_header=True,
+        header_style="bold red" if has_high else "bold yellow",
+    )
+    table.add_column("Severity", min_width=8)
+    table.add_column("File", style="cyan", min_width=16)
+    table.add_column("Line", justify="right", min_width=5)
+    table.add_column("Finding", min_width=40)
+
+    for file_path, finding in rows:
+        severity = str(finding.get("severity", "LOW"))
+        style = severity_styles.get(severity, "cyan")
+        table.add_row(
+            f"[{style}]{severity}[/{style}]",
+            escape(file_path),
+            str(finding.get("line_number", "-")),
+            escape(str(finding.get("message", ""))),
+        )
+
+    err_console.print(table)
+    err_console.print(
+        Panel(
+            f"[bold]{len(rows)} risky construct(s)[/bold] would be added to your codebase "
+            "by this patch.\n"
+            "These were not present in the original file(s). Read the highlighted lines in "
+            "the diff above before approving.\n\n"
+            "[dim]CodePilot does not block the patch: nothing is written to disk until you "
+            "run 'apply --approved'.[/dim]",
+            title=(
+                "[bold red]Review Carefully Before Approving[/bold red]"
+                if has_high
+                else "[bold yellow]Review Before Approving[/bold yellow]"
+            ),
+            border_style="red" if has_high else "yellow",
+        )
+    )
+    return len(rows)
+
+
+def _looks_like_file_path(value: str) -> bool:
+    """Heuristically decide whether a CLI target was meant as a file path, not prose.
+
+    Used so that 'codepilot fix <path>' reports a mistyped or missing path instead of
+    reinterpreting it as an issue description and silently fixing an unrelated file.
+    A value qualifies only when it carries no whitespace (free-form descriptions do) and
+    either ends in a known source extension or contains a directory separator.
+    """
+    candidate = value.strip()
+    if not candidate or any(ch.isspace() for ch in candidate):
+        return False
+    if Path(candidate).suffix.lower() in SOURCE_EXTENSIONS:
+        return True
+    return "/" in candidate or "\\" in candidate
 
 
 def version_callback(value: bool) -> None:
@@ -403,14 +527,29 @@ def doctor_cmd(
         console.print(table)
 
         if report.passed:
-            console.print(
-                Panel(
-                    f"[bold green]All critical diagnostic checks passed! ({report.passed_count}/{report.total_count})[/bold green]\n"
-                    "Your environment meets all system requirements.",
-                    title="[bold green]Doctor Diagnosis: Healthy[/bold green]",
-                    border_style="green",
+            # Non-critical checks do not fail the run, but claiming the environment "meets
+            # all requirements" while a warning is on screen misreports the diagnosis.
+            warnings = [c for c in report.checks if not c.passed and not c.is_critical]
+            if warnings:
+                console.print(
+                    Panel(
+                        f"[bold green]All critical diagnostic checks passed! ({report.passed_count}/{report.total_count})[/bold green]\n"
+                        f"[yellow]{len(warnings)} non-critical check(s) need attention:[/yellow]\n"
+                        + "\n".join(f"  • {escape(c.name)}" for c in warnings)
+                        + "\n[dim]CodePilot will run, but the features above may be unavailable.[/dim]",
+                        title="[bold yellow]Doctor Diagnosis: Healthy (with warnings)[/bold yellow]",
+                        border_style="yellow",
+                    )
                 )
-            )
+            else:
+                console.print(
+                    Panel(
+                        f"[bold green]All critical diagnostic checks passed! ({report.passed_count}/{report.total_count})[/bold green]\n"
+                        "Your environment meets all system requirements.",
+                        title="[bold green]Doctor Diagnosis: Healthy[/bold green]",
+                        border_style="green",
+                    )
+                )
         else:
             err_console.print(
                 Panel(
@@ -1465,6 +1604,16 @@ def fix_cmd(
                     target_file_rel = target_str
                 if not prompt_desc:
                     prompt_desc = f"Fix code issues and improve implementation in '{target_file_rel}'"
+            elif target_str and _looks_like_file_path(target_str):
+                # The target was clearly meant as a file but does not exist. Treating it as
+                # free-form prose would silently retarget the fix at an unrelated file, so
+                # report the bad path instead of guessing.
+                raise FixError(
+                    f"Target file '{target_str}' does not exist in '{root}'.\n"
+                    "Check the path (it is interpreted relative to the project root), or "
+                    "describe the problem instead:\n"
+                    "  codepilot fix --issue '<description>'"
+                )
             elif target_str:
                 # target_str is an issue description
                 if not prompt_desc:
@@ -1494,7 +1643,7 @@ def fix_cmd(
             if full_target_file.is_file():
                 try:
                     f_content = full_target_file.read_text(encoding="utf-8", errors="replace")
-                    tree = ast.parse(f_content)
+                    tree = ast.parse(f_content.lstrip("﻿"))
                     for node in ast.walk(tree):
                         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                             if node.name.lower() in prompt_desc.lower() or not target_symbol:
@@ -1740,6 +1889,9 @@ def fix_cmd(
             syntax = Syntax(fp.diff, "diff", theme="monokai", line_numbers=True)
             console.print(syntax)
 
+        _render_patch_risk_warning(patch_bundle)
+        _render_skipped_tasks(patch_bundle)
+
         console.print(
             Panel(
                 "To inspect this patch again later:\n"
@@ -1831,6 +1983,9 @@ def diff_cmd(
             syntax = Syntax(fp.diff, "diff", theme="monokai", line_numbers=True)
             console.print(syntax)
 
+        _render_patch_risk_warning(bundle)
+        _render_skipped_tasks(bundle)
+
         if not bundle.is_applied:
             console.print(
                 Panel(
@@ -1841,6 +1996,15 @@ def diff_cmd(
                 )
             )
 
+    except FixError as e:
+        err_console.print(
+            Panel(
+                f"[bold red]Pending patch could not be read:[/bold red]\n{e}",
+                title="[bold red]Damaged Patch File[/bold red]",
+                border_style="red",
+            )
+        )
+        raise typer.Exit(code=1) from e
     except Exception as e:
         err_console.print(f"[bold red]Unexpected Error during diff inspection:[/bold red] {e}")
         raise typer.Exit(code=1) from e
@@ -1872,6 +2036,15 @@ def apply_cmd(
     """Validate and apply a previously generated patch bundle with automatic pre-apply backup."""
     try:
         core_app = CodePilotApp(project_root=directory)
+
+        # Capture risk metadata before applying: a successful apply consumes the pending
+        # patch, and the developer should be told what was just written to their files.
+        pending_risk: Optional[Any] = None
+        try:
+            pending_risk = load_pending_patch(directory)
+        except FixError:
+            pending_risk = None  # damaged patch is reported by apply_approved_patch below
+
         result = apply_approved_patch(directory, approved=approved, config=core_app.config)
 
         if json_output:
@@ -1893,6 +2066,12 @@ def apply_cmd(
                 border_style="green",
             )
         )
+
+        if pending_risk is not None and _render_patch_risk_warning(pending_risk):
+            err_console.print(
+                "[dim]These constructs are now present in your working tree. "
+                "To undo: codepilot rollback[/dim]"
+            )
 
     except PatchError as e:
         err_console.print(
@@ -1924,6 +2103,11 @@ def rollback_cmd(
         "--list",
         "-l",
         help="List available backup snapshots without restoring.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Restore even if a target file was modified after the patch was applied (discards those edits).",
     ),
     directory: Path = typer.Option(
         Path("."),
@@ -1972,8 +2156,29 @@ def rollback_cmd(
             console.print(table)
             return
 
+        # Rollback overwrites the working copy of every file in the snapshot. If a file was
+        # edited after the patch was applied, restoring it would silently discard that work,
+        # so the developer is told and must opt in with --force.
+        if not force:
+            manifest = resolve_backup_manifest(directory, patch_id=patch_id)
+            diverged = detect_post_apply_divergence(directory, manifest)
+            if diverged:
+                err_console.print(
+                    Panel(
+                        "[bold yellow]Rollback stopped to protect your changes.[/bold yellow]\n\n"
+                        f"These file(s) were modified after patch [bold]{manifest.patch_id}[/bold] "
+                        "was applied. Restoring the backup would discard those edits:\n"
+                        + "\n".join(f"  • {escape(f)}" for f in diverged)
+                        + "\n\nCommit or save your work first, or overwrite it deliberately:\n"
+                        "  [bold]codepilot rollback --force[/bold]",
+                        title="[bold yellow]Unsaved Changes Detected[/bold yellow]",
+                        border_style="yellow",
+                    )
+                )
+                raise typer.Exit(code=1)
+
         # Perform rollback
-        result = rollback_patch(directory, patch_id=patch_id)
+        result = rollback_patch(directory, patch_id=patch_id, force=force)
 
         if json_output:
             sys.stdout.write(json.dumps(result.to_dict(), indent=2) + "\n")

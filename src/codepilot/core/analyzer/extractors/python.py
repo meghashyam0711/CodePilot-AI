@@ -7,7 +7,7 @@ from Python source files without executing code or loading an LLM.
 import ast
 from pathlib import Path
 import sys
-from typing import Any, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from codepilot.core.analyzer.extractors.base import LanguageExtractor
 from codepilot.core.analyzer.models import (
@@ -94,8 +94,24 @@ class PythonLanguageExtractor(LanguageExtractor):
 
     SUPPORTED_EXTENSIONS = {".py", ".pyi"}
 
+    def __init__(self) -> None:
+        # Cache of local module names per project root. Resolving them requires a full
+        # recursive walk of the repository, and the result is identical for every file in
+        # that repository, so without this cache the walk ran once per analyzed file --
+        # quadratic behaviour that dominated 'codepilot analyze' runtime.
+        self._local_name_cache: Dict[str, Set[str]] = {}
+
     def can_handle(self, file_path: Path) -> bool:
         return file_path.suffix.lower() in self.SUPPORTED_EXTENSIONS
+
+    def _local_module_names(self, project_root: Path) -> Set[str]:
+        """Return the set of Python module stems defined inside the project (cached)."""
+        key = str(project_root.resolve())
+        cached = self._local_name_cache.get(key)
+        if cached is None:
+            cached = {p.stem for p in project_root.rglob("*.py")}
+            self._local_name_cache[key] = cached
+        return cached
 
     def extract(self, file_path: Path, content: str, project_root: Path) -> ModuleInfo:
         rel_path = str(file_path.resolve().relative_to(project_root.resolve())).replace(
@@ -104,7 +120,9 @@ class PythonLanguageExtractor(LanguageExtractor):
         line_count = len(content.splitlines())
 
         try:
-            tree = ast.parse(content, filename=str(file_path))
+            # Strip a leading UTF-8 BOM: CPython accepts BOM-prefixed source files, but
+            # ast.parse() on already-decoded utf-8 text rejects U+FEFF.
+            tree = ast.parse(content.lstrip("﻿"), filename=str(file_path))
         except (SyntaxError, ValueError, MemoryError, RecursionError) as e:
             # Safely handle syntax or parse errors without crashing
             return ModuleInfo(
@@ -120,10 +138,8 @@ class PythonLanguageExtractor(LanguageExtractor):
         functions: List[FunctionInfo] = []
         has_main_block = False
 
-        # Build list of local module prefixes based on project files
-        local_py_names: Set[str] = set()
-        for p in project_root.rglob("*.py"):
-            local_py_names.add(p.stem)
+        # Local module prefixes for this project (resolved once per project root)
+        local_py_names: Set[str] = self._local_module_names(project_root)
 
         for stmt in tree.body:
             # Check main block

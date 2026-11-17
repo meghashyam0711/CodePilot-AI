@@ -25,7 +25,7 @@ from codepilot.core.security import (
     check_file_permission,
     validate_target_path,
 )
-from codepilot.exceptions import PatchError, SecurityError
+from codepilot.exceptions import FixError, PatchError, SecurityError
 from codepilot.logging_config import get_logger
 
 logger = get_logger("core.patcher")
@@ -80,7 +80,11 @@ def apply_approved_patch(
 
     root = project_root.resolve()
     cfg = config or load_config(root)
-    bundle = load_pending_patch(root)
+    try:
+        bundle = load_pending_patch(root)
+    except FixError as e:
+        # Surface a damaged patch file as a patch rejection, not as an unexpected error.
+        raise PatchError(str(e)) from e
 
     # Validate patch existence
     if bundle is None or not bundle.file_patches:
@@ -94,10 +98,15 @@ def apply_approved_patch(
             f"Patch '{bundle.patch_id}' has already been applied. Run 'codepilot scan' to find new tasks."
         )
 
-    # Validate security boundaries, staleness, and file integrity
+    # Validate security boundaries, staleness, and file integrity.
+    # The canonical path produced by validate_target_path() is retained per patch so the
+    # write phase below reuses the verified path instead of re-deriving it from the
+    # untrusted 'file_path' string held in the patch bundle.
+    validated_paths: Dict[int, Path] = {}
     for fp in bundle.file_patches:
         try:
             target_path = validate_target_path(fp.file_path, root, cfg)
+            validated_paths[id(fp)] = target_path
         except SecurityError as e:
             raise PatchError(f"Security violation applying patch to '{fp.file_path}': {e}") from e
 
@@ -132,11 +141,23 @@ def apply_approved_patch(
                 "To prevent overwriting unreviewed changes, run 'codepilot fix --preview' again."
             )
 
-        # Enforce structural executable AST invariance for AI-DOCS modifications
-        is_docs_patch = (
-            getattr(fp, "instruction_type", None) == "AI-DOCS"
-            or bool(re.search(r"#\s*ai-docs?\b", fp.original_content, re.IGNORECASE))
-        )
+        # Enforce structural executable AST invariance for documentation-only patches.
+        #
+        # The recorded instruction_type is authoritative: the fix engine sets "AI-DOCS"
+        # only when EVERY task for the file was documentation-only, and sets the driving
+        # non-docs type otherwise. Scanning the file body for an 'AI-DOCS' marker is used
+        # only as a fallback for bundles that carry no type at all (hand-built or written
+        # by an older version), because that marker also appears in files which carry
+        # legitimate executable AI-FIX / AI-TASK work; applying it to those would reject
+        # the whole patch.
+        recorded_type = getattr(fp, "instruction_type", None)
+        if recorded_type is None:
+            is_docs_patch = bool(
+                re.search(r"#\s*ai-docs?\b", fp.original_content, re.IGNORECASE)
+            )
+        else:
+            is_docs_patch = recorded_type == "AI-DOCS"
+
         if fp.file_path.endswith((".py", ".pyi")) and is_docs_patch:
             from codepilot.core.fixer import verify_executable_ast_invariance
 
@@ -156,20 +177,24 @@ def apply_approved_patch(
 
     # Safe atomic application of modified contents with automated rollback on write failure
     applied_files: List[str] = []
+    current_file: Optional[str] = None
     try:
         for fp in bundle.file_patches:
-            target_path = root / fp.file_path
+            current_file = fp.file_path
+            target_path = validated_paths[id(fp)]
             target_path.write_text(fp.proposed_content, encoding="utf-8")
             applied_files.append(fp.file_path)
             logger.info("Applied patch to '%s'", fp.file_path)
-    except OSError as e:
+    except Exception as e:
+        # Any write failure, not only OSError (e.g. an encoding error), must roll the
+        # partially applied bundle back so the working tree is never left half-patched.
         try:
             from codepilot.core.recovery import rollback_patch
 
-            rollback_patch(root, bundle.patch_id)
+            rollback_patch(root, bundle.patch_id, force=True)
         except Exception as rb_err:
             logger.error("Automated rollback failed during write abort: %s", rb_err)
-        raise PatchError(f"Failed to write changes to '{fp.file_path}': {e}") from e
+        raise PatchError(f"Failed to write changes to '{current_file}': {e}") from e
 
     bundle.is_approved = True
     bundle.is_applied = True

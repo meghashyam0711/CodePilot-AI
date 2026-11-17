@@ -371,9 +371,14 @@ def scan_repository(
                             "message": f"Source file '{rel_path}' is empty.",
                         })
                     elif ext in (".py", ".pyi"):
-                        # Static analysis check 2: Python AST parse error detection
+                        # Static analysis check 2: Python AST parse error detection.
+                        # A leading UTF-8 BOM is stripped first: Python itself accepts
+                        # BOM-prefixed source files, but ast.parse() on text already
+                        # decoded as plain utf-8 rejects the U+FEFF character, which
+                        # reported every BOM-encoded file (the Windows default for many
+                        # editors) as a spurious syntax error.
                         try:
-                            ast.parse(content)
+                            ast.parse(content.lstrip("﻿"))
                         except SyntaxError as e:
                             static_findings.append({
                                 "file": rel_path,

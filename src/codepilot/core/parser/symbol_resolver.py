@@ -62,7 +62,7 @@ class SymbolResolver:
     ) -> Optional[ResolvedSymbol]:
         """Resolve Python symbols using AST node inspection."""
         try:
-            tree = ast.parse(content)
+            tree = ast.parse(content.lstrip("﻿"))
         except Exception:
             return None
 

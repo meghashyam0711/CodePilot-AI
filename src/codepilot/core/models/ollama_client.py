@@ -27,6 +27,27 @@ DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "qwen2.5:1.5b-instruct-q4_K_M"
 PREFERRED_CODER_MODEL = "qwen2.5-coder:1.5b"
 
+# Hostnames that keep inference on the developer's own machine.
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
+
+
+def is_local_endpoint(base_url: str) -> bool:
+    """Return True when base_url points at the local machine.
+
+    CodePilot's core guarantee is that source code never leaves the developer's system,
+    so a configured endpoint that is not loopback must be surfaced rather than used
+    silently: every prompt sent there carries repository source code.
+    """
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(base_url).hostname or "").strip().lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    return host in _LOOPBACK_HOSTS or host.endswith(".localhost") or host.startswith("127.")
+
 
 class OllamaRuntimeError(CodePilotError):
     """Raised when Ollama service encounters a runtime or communication error."""
@@ -54,6 +75,14 @@ class OllamaClient(BaseModelClient):
         self.timeout = timeout
         self._cached_tags: Optional[List[Dict[str, Any]]] = None
         self._last_tags_check: float = 0.0
+        self.is_local = is_local_endpoint(self.base_url)
+        if not self.is_local:
+            logger.warning(
+                "Configured Ollama endpoint '%s' is not a local address. Repository source "
+                "code included in prompts will be transmitted to that host, which defeats "
+                "CodePilot's local-only privacy guarantee.",
+                self.base_url,
+            )
 
     @property
     def provider_name(self) -> str:
@@ -167,7 +196,18 @@ class OllamaClient(BaseModelClient):
                 f"Run 'ollama run {target_model}' to pull it before use.",
             )
 
-        return True, f"Ollama is healthy at {self.base_url}. Active model: '{target_model}'."
+        locality_note = (
+            ""
+            if self.is_local
+            else (
+                f"\nWARNING: '{self.base_url}' is a remote endpoint. Repository source code "
+                "in prompts will be sent off this machine."
+            )
+        )
+        return (
+            True,
+            f"Ollama is healthy at {self.base_url}. Active model: '{target_model}'.{locality_note}",
+        )
 
     def generate(self, request: ModelRequest, model_name: Optional[str] = None) -> ModelResponse:
         """Send inference request to local Ollama /api/generate endpoint.

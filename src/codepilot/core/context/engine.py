@@ -12,6 +12,7 @@ from codepilot.core.context.models import (
     RelatedContext,
 )
 from codepilot.core.parser.models import InstructionTask
+from codepilot.core.security import redact_secrets_for_context
 from codepilot.logging_config import get_logger
 
 logger = get_logger("core.context.engine")
@@ -84,13 +85,28 @@ class ProjectContextEngine:
         # 2. Read target file safely
         try:
             content = full_path.read_text(encoding="utf-8", errors="replace")
-            lines = content.splitlines()
         except Exception as e:
             return ProjectContextBundle(
                 task=task,
                 is_safe=True,
                 warnings=[f"Could not read target file '{task.file_path}': {e}"],
             )
+
+        # 2b. Redact hardcoded credentials before the content can reach a model.
+        #
+        # Blocking credential *files* (step 1) does not cover a secret hardcoded inside an
+        # ordinary source file, which was previously forwarded verbatim. Redaction is
+        # conservative and preserves line numbering, so the snippet still maps onto the
+        # real file and remains code the model can reason about.
+        content, secret_findings = redact_secrets_for_context(content)
+        if secret_findings:
+            warnings.append(
+                f"Redacted from model context in '{task.file_path}': "
+                f"{', '.join(secret_findings)}. Proposed changes will not contain the "
+                "original values."
+            )
+
+        lines = content.splitlines()
 
         # 3. Extract code snippet
         target_snippet = self._extract_snippet(lines, task, task.file_path)
@@ -168,7 +184,7 @@ class ProjectContextEngine:
         # If Python and symbol is resolved to a function or class, attempt to locate exact AST span
         if rel_path.endswith((".py", ".pyi")) and task.target_symbol and task.target_symbol != Path(rel_path).stem:
             try:
-                tree = ast.parse("\n".join(lines))
+                tree = ast.parse("\n".join(lines).lstrip("﻿"))
                 symbol_span = self._find_ast_symbol_span(tree, task.target_symbol)
                 if symbol_span:
                     s_start, s_end = symbol_span

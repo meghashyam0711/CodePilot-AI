@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Any, List, Optional, Set, Union
+from typing import Any, List, Optional, Set, Tuple, Union
 
 from codepilot.config import CodePilotConfig
 from codepilot.exceptions import SecurityError
@@ -39,13 +39,94 @@ class FileOperation(str, Enum):
     OVERWRITE = "OVERWRITE"
 
 
-# Common secret pattern regexes for defensive sanitization
-SECRET_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|secret|token|password|auth|credential)['\"]\s*[:=]\s*['\"]([^'\"]+)['\"]"),
-    re.compile(r"sk-[a-zA-Z0-9]{20,60}"),  # OpenAI style keys
-    re.compile(r"ghp_[a-zA-Z0-9]{36,40}"),  # GitHub personal tokens
-    re.compile(r"AKIA[0-9A-Z]{16}"),         # AWS access key ID
-    re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----.*?-----END [A-Z ]+ PRIVATE KEY-----", re.DOTALL),
+# ==============================================================================
+# Secret redaction
+#
+# Single source of truth for the patterns used to redact credentials. Two distinct
+# consumers with deliberately different aggressiveness:
+#
+#   sanitize_log_output()          -- diagnostics, logs, error text. Aggressive: a false
+#                                     positive only makes a log line less readable.
+#   redact_secrets_for_context()   -- source code about to be placed in an LLM prompt.
+#                                     Conservative: over-redacting mangles the code the
+#                                     model has to reason about, so only high-confidence
+#                                     secrets are removed and line numbering is preserved.
+#
+# Note: codepilot.core.dataset.validator keeps its own pattern list. That serves a
+# different purpose (rejecting training examples outright, with human-readable reasons)
+# and uses stricter thresholds, so it is intentionally not merged here.
+# ==============================================================================
+
+REDACTION_PLACEHOLDER = "***REDACTED_SECRET***"
+PRIVATE_KEY_PLACEHOLDER = "***REDACTED_PRIVATE_KEY***"
+
+# Keys whose assigned value is treated as sensitive.
+_SECRET_KEY_NAMES = (
+    r"api[_-]?keys?|secret[_-]?key|client[_-]?secret|access[_-]?key[_-]?id|access[_-]?key"
+    r"|secret[_-]?access[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token"
+    r"|refresh[_-]?token|bearer|authorization|auth|credentials?|token|passwords?|passwd|pwd|secret"
+)
+
+# Vendor-specific token shapes. These are unambiguous enough to redact anywhere,
+# including inside source code sent to a model.
+VENDOR_SECRET_PATTERNS: List["re.Pattern[str]"] = [
+    re.compile(r"sk-[a-zA-Z0-9_\-]{20,80}"),          # OpenAI-style secret key
+    re.compile(r"ghp_[a-zA-Z0-9]{36,40}"),            # GitHub personal access token
+    re.compile(r"gho_[a-zA-Z0-9]{36,40}"),            # GitHub OAuth token
+    re.compile(r"github_pat_[a-zA-Z0-9_]{22,100}"),   # GitHub fine-grained PAT
+    re.compile(r"AKIA[0-9A-Z]{16}"),                  # AWS access key ID
+    re.compile(r"ASIA[0-9A-Z]{16}"),                  # AWS temporary access key ID
+    re.compile(r"xox[baprs]-[a-zA-Z0-9\-]{10,250}"),  # Slack tokens
+    re.compile(r"AIza[0-9A-Za-z_\-]{35}"),            # Google API key
+    re.compile(r"glpat-[a-zA-Z0-9_\-]{20,}"),         # GitLab personal access token
+    re.compile(r"sk_(?:live|test)_[a-zA-Z0-9]{16,}"), # Stripe secret key
+    re.compile(r"eyJ[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-]{10,}"),  # JWT
+]
+
+# A PEM private key block, matched so it can be replaced line-for-line.
+PRIVATE_KEY_BLOCK_PATTERN = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    re.DOTALL,
+)
+
+# Quote-aware key/value secret assignment. Handles bare, single-quoted and
+# double-quoted keys, ':' or '=' delimiters, and optionally quoted values -- which
+# covers the JSON form ("api_key": "...") that an unquoted-key-only pattern missed.
+#
+# The key may carry an identifier prefix: '_' is a word character, so requiring a word
+# boundary before the name failed to match the very common 'db_password',
+# 'openai_api_key' and 'MY_SECRET' forms. A trailing boundary is still required, which
+# keeps 'token_count' and 'tokenizer' from being treated as credentials.
+KEY_VALUE_SECRET_PATTERN = re.compile(
+    r"""(?ix)
+    (?P<key>["']?[A-Za-z0-9_]*(?:""" + _SECRET_KEY_NAMES + r""")\b["']?\s*[:=]\s*)
+    (?P<open>["']?)
+    (?P<value>[^\s"',;)\]}]+)
+    (?P=open)
+    """
+)
+
+# Values that are not real secrets: placeholders, empty strings, and indirections
+# that read the value from somewhere else at runtime.
+_NON_SECRET_VALUES = re.compile(
+    r"""(?ix)^(?:
+        none|null|nil|true|false|undefined|empty
+        |os\.environ.*|os\.getenv.*|getenv.*|process\.env.*|env\..*
+        |your[_-]?.*|my[_-]?.*|placeholder|example|sample|dummy|test|testing
+        |changeme|change[_-]?me|todo|fixme|redacted|xxx+|\.\.\.|\*+
+        |<.*>|\{\{.*\}\}|\$\{.*\}|%s|\{\}
+    )$"""
+)
+
+# Minimum length before an opaque literal assigned to a secret-named key is treated as a
+# real credential in source code. Short values are usually enum members or flags.
+_MIN_CONTEXT_SECRET_LENGTH = 12
+
+# Retained for backward compatibility with earlier releases that imported this name.
+SECRET_PATTERNS: List["re.Pattern[str]"] = [
+    KEY_VALUE_SECRET_PATTERN,
+    *VENDOR_SECRET_PATTERNS,
+    PRIVATE_KEY_BLOCK_PATTERN,
 ]
 
 
@@ -158,27 +239,115 @@ def validate_target_path(
 
 
 def sanitize_log_output(text: str) -> str:
-    """Scrub potential secret values, authorization tokens, and credentials from string output."""
+    """Scrub secret values, authorization tokens, and credentials from string output.
+
+    Intended for logs, diagnostics and error messages, where readability matters less
+    than never printing a credential. Redaction is therefore deliberately aggressive:
+    any value assigned to a secret-sounding key is masked regardless of how it looks.
+
+    Handles bare, single-quoted and double-quoted keys with either ':' or '=' as the
+    delimiter, so the JSON form '"api_key": "<secret>"' is redacted as well as the
+    'api_key=<secret>' form.
+    """
     if not text:
         return ""
-    sanitized = text
-    # Key-value secret patterns
-    sanitized = re.sub(
-        r"(?i)(api[_-]?key|secret|token|password|auth|credential)\s*([:=])\s*['\"]?([^'\"\s,;]+)['\"]?",
-        r"\1\2***REDACTED_SECRET***",
-        sanitized,
-    )
-    # Token prefixes
-    sanitized = re.sub(r"sk-[a-zA-Z0-9]{20,60}", "***REDACTED_SECRET***", sanitized)
-    sanitized = re.sub(r"ghp_[a-zA-Z0-9]{36,40}", "***REDACTED_SECRET***", sanitized)
-    sanitized = re.sub(r"AKIA[0-9A-Z]{16}", "***REDACTED_SECRET***", sanitized)
-    sanitized = re.sub(
-        r"-----BEGIN [A-Z ]+ PRIVATE KEY-----.*?-----END [A-Z ]+ PRIVATE KEY-----",
-        "***REDACTED_PRIVATE_KEY***",
-        sanitized,
-        flags=re.DOTALL,
-    )
+
+    sanitized = PRIVATE_KEY_BLOCK_PATTERN.sub(PRIVATE_KEY_PLACEHOLDER, text)
+
+    def _mask_key_value(match: "re.Match[str]") -> str:
+        quote = match.group("open")
+        return f"{match.group('key')}{quote}{REDACTION_PLACEHOLDER}{quote}"
+
+    sanitized = KEY_VALUE_SECRET_PATTERN.sub(_mask_key_value, sanitized)
+
+    for pattern in VENDOR_SECRET_PATTERNS:
+        sanitized = pattern.sub(REDACTION_PLACEHOLDER, sanitized)
+
     return sanitized
+
+
+def redact_secrets_for_context(text: str) -> Tuple[str, List[str]]:
+    """Redact high-confidence secrets from source code bound for an LLM prompt.
+
+    CodePilot excludes credential *files* from model context, but a hardcoded key inside
+    an ordinary source file was previously forwarded verbatim. This closes that gap.
+
+    Unlike sanitize_log_output(), this is deliberately conservative: the result is code
+    the model must still be able to read and modify, so over-redaction is a correctness
+    problem, not just a cosmetic one. Only the following are removed:
+
+    1. Vendor-shaped tokens (OpenAI, GitHub, AWS, Slack, Google, GitLab, Stripe, JWT),
+       which are unambiguous wherever they appear.
+    2. PEM private key blocks, replaced line-for-line.
+    3. Opaque literals assigned to a secret-named key, but only when the value is at
+       least _MIN_CONTEXT_SECRET_LENGTH characters and is not a recognizable placeholder
+       or a runtime indirection such as os.environ[...].
+
+    Variable names, function signatures, control flow and line numbering are preserved,
+    so a redacted snippet still maps onto the real file.
+
+    Args:
+        text: Source content destined for a model prompt.
+
+    Returns:
+        (redacted_text, descriptions) where descriptions names each kind of secret
+        removed, suitable for surfacing to the developer.
+    """
+    if not text:
+        return "", []
+
+    findings: List[str] = []
+    redacted = text
+
+    # 1. PEM private keys: replace with the same number of lines so that line numbers
+    #    reported for the snippet continue to match the real file.
+    def _mask_private_key(match: "re.Match[str]") -> str:
+        line_count = match.group(0).count("\n")
+        return "\n".join([PRIVATE_KEY_PLACEHOLDER] * (line_count + 1))
+
+    redacted, pem_count = PRIVATE_KEY_BLOCK_PATTERN.subn(_mask_private_key, redacted)
+    if pem_count:
+        findings.append(f"{pem_count} private key block(s)")
+
+    # 2. Vendor-shaped tokens.
+    vendor_hits = 0
+    for pattern in VENDOR_SECRET_PATTERNS:
+        redacted, count = pattern.subn(REDACTION_PLACEHOLDER, redacted)
+        vendor_hits += count
+    if vendor_hits:
+        findings.append(f"{vendor_hits} provider API token(s)")
+
+    # 3. Opaque literals assigned to secret-named keys.
+    assignment_hits = 0
+
+    def _mask_assignment(match: "re.Match[str]") -> str:
+        nonlocal assignment_hits
+        value = match.group("value")
+        quote = match.group("open")
+
+        if REDACTION_PLACEHOLDER in value or PRIVATE_KEY_PLACEHOLDER in value:
+            return match.group(0)  # already redacted above
+        if len(value) < _MIN_CONTEXT_SECRET_LENGTH:
+            return match.group(0)  # too short to be a credential; likely a flag or enum
+        if _NON_SECRET_VALUES.match(value):
+            return match.group(0)  # placeholder or runtime indirection, not a secret
+        if not quote:
+            # Unquoted in source code this is an identifier or expression, not a literal.
+            return match.group(0)
+
+        assignment_hits += 1
+        return f"{match.group('key')}{quote}{REDACTION_PLACEHOLDER}{quote}"
+
+    redacted = KEY_VALUE_SECRET_PATTERN.sub(_mask_assignment, redacted)
+    if assignment_hits:
+        findings.append(f"{assignment_hits} hardcoded credential value(s)")
+
+    if findings:
+        logger.warning(
+            "Redacted secrets from content before model submission: %s", ", ".join(findings)
+        )
+
+    return redacted, findings
 
 
 def sanitize_filename(filename: str) -> str:

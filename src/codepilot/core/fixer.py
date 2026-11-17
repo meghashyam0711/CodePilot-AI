@@ -7,7 +7,7 @@ Enforces security boundaries, path traversal guards, and protected-file rules.
 
 import ast
 import copy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields as dataclasses_fields
 from datetime import datetime, timezone
 import difflib
 import hashlib
@@ -41,13 +41,21 @@ class FilePatch:
     proposed_content: str
     diff: str
     instruction_type: Optional[str] = None
+    # Risky constructs this patch introduces (see core.patch_risk). Advisory metadata that
+    # travels with the patch so 'diff' and 'apply' can surface it as prominently as the
+    # preview did, rather than relying on the reviewer having noticed it the first time.
+    risk_findings: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "FilePatch":
-        return cls(**data)
+        # Unknown keys are ignored rather than raising TypeError, so a patch bundle
+        # written by a different CodePilot version still loads instead of being
+        # reported to the developer as "no pending patch found".
+        known = {f.name for f in dataclasses_fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 @dataclass
@@ -66,6 +74,10 @@ class PatchBundle:
     output_source: str = "model"
     status: str = "success"
     clarification_question: Optional[str] = None
+    # Tasks (or whole files) that could not be turned into a usable change. Recorded so a
+    # partially successful run can still be staged while telling the developer exactly
+    # what was skipped and why.
+    task_failures: List[Dict[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.model_provider == "mock":
@@ -89,6 +101,8 @@ class PatchBundle:
         }
         if self.clarification_question is not None:
             d["clarification_question"] = self.clarification_question
+        if self.task_failures:
+            d["task_failures"] = list(self.task_failures)
         return d
 
     @classmethod
@@ -111,6 +125,7 @@ class PatchBundle:
             output_source=output_source,
             status=data.get("status", "success"),
             clarification_question=data.get("clarification_question"),
+            task_failures=data.get("task_failures", []) or [],
         )
 
 
@@ -171,12 +186,12 @@ def verify_executable_ast_invariance(orig_code: str, proposed_code: str) -> Tupl
         (is_invariant, reason)
     """
     try:
-        orig_tree = ast.parse(orig_code)
+        orig_tree = ast.parse(orig_code.lstrip("﻿"))
     except SyntaxError as e:
         return False, f"Original code has syntax error: {e}"
 
     try:
-        proposed_tree = ast.parse(proposed_code)
+        proposed_tree = ast.parse(proposed_code.lstrip("﻿"))
     except SyntaxError as e:
         return False, f"Proposed code has syntax error: {e}"
 
@@ -568,7 +583,7 @@ def find_enclosing_function(file_content: str, line_number: int) -> Optional[str
         The string name of the enclosing function/method, or None if not inside a function.
     """
     try:
-        tree = ast.parse(file_content)
+        tree = ast.parse(file_content.lstrip("﻿"))
     except Exception:
         return None
 
@@ -825,6 +840,9 @@ def generate_preview_patch(
     file_patches: List[FilePatch] = []
     full_diff_pieces: List[str] = []
     clarification_questions: List[Dict[str, str]] = []
+    # Per-task and per-file failures, collected rather than raised, so that one unusable
+    # model output does not discard the work of every other task in the run.
+    task_failures: List[Dict[str, str]] = []
 
     for rel_path, tasks in tasks_by_file.items():
         # Security Boundary Enforcement: validate target path
@@ -885,120 +903,218 @@ def generate_preview_patch(
                 )
                 bundle = ctx_engine.build_context(inst_task, token_budget=config.max_context_tokens)
                 if not bundle.is_safe:
+                    # Fatal, never downgraded to a per-task failure: a security boundary
+                    # violation must stop the whole run rather than be reported as one
+                    # task that happened not to work.
                     raise FixError(
                         f"Security violation building context for task '{task.task_id}': {bundle.safety_warning}"
                     )
 
-                req = build_model_request(bundle, max_tokens=1024, temperature=0.1)
+                # Snapshot so that a task which fails midway leaves no partial edit behind
+                # and the tasks that already succeeded for this file are preserved.
+                lines_before_task = list(current_lines)
                 try:
-                    resp = model_client.generate(req, model_name=override_model)
-                except Exception as e:
-                    raise FixError(
-                        f"Model inference failed for task '{task.task_id}': {e}"
-                    ) from e
+                    req = build_model_request(bundle, max_tokens=1024, temperature=0.1)
+                    try:
+                        resp = model_client.generate(req, model_name=override_model)
+                    except Exception as e:
+                        raise FixError(
+                            f"Model inference failed for task '{task.task_id}': {e}"
+                        ) from e
 
-                if not resp or not resp.completion or not resp.completion.strip():
-                    raise FixError(
-                        f"Model returned an empty response for task '{task.task_id}' in '{rel_path}'."
+                    if not resp or not resp.completion or not resp.completion.strip():
+                        raise FixError(
+                            f"Model returned an empty response for task '{task.task_id}' in '{rel_path}'."
+                        )
+
+                    # Route Check: If task routed to CLARIFICATION, record question and skip patch extraction
+                    route = req.metadata.get("route") if req.metadata else None
+                    if route == "clarification":
+                        clarification_text = resp.completion.strip()
+                        logger.info(
+                            "Task '%s' in '%s' routed to CLARIFICATION: %s",
+                            task.task_id,
+                            rel_path,
+                            clarification_text[:100],
+                        )
+                        clarification_questions.append({
+                            "task_id": task.task_id,
+                            "file_path": rel_path,
+                            "question": clarification_text,
+                        })
+                        continue
+
+                    extracted = extract_code_from_completion(resp.completion)
+                    if not extracted or not extracted.strip():
+                        raise FixError(
+                            f"Could not extract usable code modification from model completion for task '{task.task_id}' in '{rel_path}'.\n"
+                            f"Raw completion: {resp.completion[:200]!r}"
+                        )
+
+                    # Secrets are redacted from the context sent to the model. If the model
+                    # echoes a redaction placeholder back, applying it would overwrite a real
+                    # credential in the developer's file with the placeholder text, so the
+                    # patch is refused instead.
+                    from codepilot.core.security import (
+                        PRIVATE_KEY_PLACEHOLDER,
+                        REDACTION_PLACEHOLDER,
                     )
 
-                # Route Check: If task routed to CLARIFICATION, record question and skip patch extraction
-                route = req.metadata.get("route") if req.metadata else None
-                if route == "clarification":
-                    clarification_text = resp.completion.strip()
-                    logger.info(
-                        "Task '%s' in '%s' routed to CLARIFICATION: %s",
+                    if REDACTION_PLACEHOLDER in extracted or PRIVATE_KEY_PLACEHOLDER in extracted:
+                        raise FixError(
+                            f"Model output for task '{task.task_id}' in '{rel_path}' contains a "
+                            "secret-redaction placeholder, which means the model echoed back "
+                            "content that was masked before submission.\n"
+                            "Applying it would overwrite a real credential in your file with "
+                            "placeholder text, so the patch was rejected. Move the hardcoded "
+                            "credential into an environment variable and retry."
+                        )
+
+                    # For AI-DOCS tasks: strictly extract docstring/comments and apply replacement safely
+                    if task.instruction_type == "AI-DOCS":
+                        valid_doc, doc_content, is_doc = extract_documentation_content(
+                            extracted, target_symbol=symbol_name
+                        )
+                        if not valid_doc or not doc_content.strip():
+                            raise FixError(
+                                f"Model output for AI-DOCS task '{task.task_id}' in '{rel_path}' does not contain "
+                                f"a valid docstring or comments: {extracted[:200]!r}"
+                            )
+                        current_lines = apply_documentation_replacement(
+                            current_lines, task.line_number, doc_content, is_docstring=is_doc
+                        )
+                    else:
+                        # Safely unwrap redundant function signature if model re-declared the enclosing function
+                        if symbol_name:
+                            extracted = unwrap_nested_function_body(extracted, target_symbol=symbol_name)
+
+                        target_idx = task.line_number - 1
+                        if 0 <= target_idx < len(current_lines):
+                            indent_match = re.match(r"^(\s*)", current_lines[target_idx])
+                            indent = indent_match.group(1) if indent_match else ""
+                            clean_code = textwrap.dedent(extracted.expandtabs(4)).strip()
+                            formatted_lines = []
+                            for code_line in clean_code.splitlines():
+                                if code_line.strip():
+                                    formatted_lines.append(f"{indent}{code_line}\n")
+                                else:
+                                    formatted_lines.append("\n")
+                            replacement = "".join(formatted_lines)
+                            current_lines[target_idx] = replacement
+
+                            # If next line is a placeholder statement at the same indentation level, remove it
+                            if target_idx + 1 < len(current_lines):
+                                next_line = current_lines[target_idx + 1]
+                                next_indent_match = re.match(r"^(\s*)", next_line)
+                                next_indent = next_indent_match.group(1) if next_indent_match else ""
+                                if next_indent == indent and next_line.strip() in (
+                                    "pass",
+                                    "...",
+                                    "raise NotImplementedError",
+                                    "raise NotImplementedError()",
+                                ):
+                                    current_lines.pop(target_idx + 1)
+
+                            # Drop a stale statement the model already re-emitted.
+                            #
+                            # When the instruction comment sits above the code it describes, a
+                            # model asked for "only the replacement statements" commonly returns
+                            # the whole body, including the statement that follows the comment.
+                            # Replacing only the comment line then leaves that statement twice --
+                            # e.g. a duplicated, unreachable 'return a / b' after the new guard
+                            # clause. Removing it requires an exact match at the same indentation
+                            # against the last statement that was inserted, so unrelated code is
+                            # never touched.
+                            inserted_statements = [
+                                ln.strip() for ln in clean_code.splitlines() if ln.strip()
+                            ]
+                            if inserted_statements and target_idx + 1 < len(current_lines):
+                                following = current_lines[target_idx + 1]
+                                following_indent_match = re.match(r"^(\s*)", following)
+                                following_indent = (
+                                    following_indent_match.group(1)
+                                    if following_indent_match
+                                    else ""
+                                )
+                                if (
+                                    following_indent == indent
+                                    and following.strip() == inserted_statements[-1]
+                                ):
+                                    current_lines.pop(target_idx + 1)
+
+                except FixError as task_error:
+                    # One task's output being unusable must not discard the work of the
+                    # other tasks in this run. Roll this task back to the pre-task state,
+                    # record why it failed, and continue with the remaining tasks.
+                    current_lines = lines_before_task
+                    logger.warning(
+                        "Task '%s' in '%s' failed and was skipped: %s",
                         task.task_id,
                         rel_path,
-                        clarification_text[:100],
+                        task_error,
                     )
-                    clarification_questions.append({
-                        "task_id": task.task_id,
+                    task_failures.append({
+                        "task_id": str(task.task_id),
                         "file_path": rel_path,
-                        "question": clarification_text,
+                        "instruction_type": str(getattr(task, "instruction_type", "") or ""),
+                        "reason": str(task_error),
                     })
                     continue
 
-                extracted = extract_code_from_completion(resp.completion)
-                if not extracted or not extracted.strip():
-                    raise FixError(
-                        f"Could not extract usable code modification from model completion for task '{task.task_id}' in '{rel_path}'.\n"
-                        f"Raw completion: {resp.completion[:200]!r}"
-                    )
-
-                # For AI-DOCS tasks: strictly extract docstring/comments and apply replacement safely
-                if task.instruction_type == "AI-DOCS":
-                    valid_doc, doc_content, is_doc = extract_documentation_content(
-                        extracted, target_symbol=symbol_name
-                    )
-                    if not valid_doc or not doc_content.strip():
-                        raise FixError(
-                            f"Model output for AI-DOCS task '{task.task_id}' in '{rel_path}' does not contain "
-                            f"a valid docstring or comments: {extracted[:200]!r}"
-                        )
-                    current_lines = apply_documentation_replacement(
-                        current_lines, task.line_number, doc_content, is_docstring=is_doc
-                    )
-                else:
-                    # Safely unwrap redundant function signature if model re-declared the enclosing function
-                    if symbol_name:
-                        extracted = unwrap_nested_function_body(extracted, target_symbol=symbol_name)
-
-                    target_idx = task.line_number - 1
-                    if 0 <= target_idx < len(current_lines):
-                        indent_match = re.match(r"^(\s*)", current_lines[target_idx])
-                        indent = indent_match.group(1) if indent_match else ""
-                        clean_code = textwrap.dedent(extracted.expandtabs(4)).strip()
-                        formatted_lines = []
-                        for code_line in clean_code.splitlines():
-                            if code_line.strip():
-                                formatted_lines.append(f"{indent}{code_line}\n")
-                            else:
-                                formatted_lines.append("\n")
-                        replacement = "".join(formatted_lines)
-                        current_lines[target_idx] = replacement
-
-                        # If next line is a placeholder statement at the same indentation level, remove it
-                        if target_idx + 1 < len(current_lines):
-                            next_line = current_lines[target_idx + 1]
-                            next_indent_match = re.match(r"^(\s*)", next_line)
-                            next_indent = next_indent_match.group(1) if next_indent_match else ""
-                            if next_indent == indent and next_line.strip() in (
-                                "pass",
-                                "...",
-                                "raise NotImplementedError",
-                                "raise NotImplementedError()",
-                            ):
-                                current_lines.pop(target_idx + 1)
-
         proposed_content = "".join(current_lines)
 
-        # Validate Python syntax if target is a Python file
+        # Validate Python syntax if target is a Python file.
+        #
+        # A validation failure here is recorded against this file and the file is dropped
+        # from the patch, rather than aborting the run: other files in the same run may
+        # have produced perfectly good changes, and discarding those too would waste the
+        # inference already paid for.
+        file_rejection: Optional[str] = None
         if rel_path.endswith(".py"):
             try:
-                ast.parse(proposed_content)
+                # A leading UTF-8 BOM is stripped before validation; otherwise every
+                # BOM-encoded file parsed as a syntax error and syntax validation was
+                # silently skipped for it (original and proposed both "failing").
+                ast.parse(proposed_content.lstrip("﻿"))
             except SyntaxError as syn_err:
                 orig_syntax_ok = False
                 try:
-                    ast.parse(original_content)
+                    ast.parse(original_content.lstrip("﻿"))
                     orig_syntax_ok = True
                 except SyntaxError:
                     pass
 
                 if orig_syntax_ok:
-                    raise FixError(
-                        f"Patch validation failed for '{rel_path}': proposed modification introduces a Python syntax error on line {syn_err.lineno}: {syn_err.msg}"
+                    file_rejection = (
+                        f"Patch validation failed for '{rel_path}': proposed modification "
+                        f"introduces a Python syntax error on line {syn_err.lineno}: {syn_err.msg}"
                     )
 
-            # Enforce executable AST invariance for AI-DOCS tasks
-            if any(getattr(t, "instruction_type", None) == "AI-DOCS" for t in tasks):
+            # Enforce executable AST invariance only when EVERY task for this file is
+            # documentation-only. A file that also carries AI-FIX / AI-TASK / AI-REFACTOR
+            # work is expected to change executable code, so the invariance rule must not
+            # be applied to the file as a whole (it would reject the entire patch).
+            if file_rejection is None and tasks and all(
+                getattr(t, "instruction_type", None) == "AI-DOCS" for t in tasks
+            ):
                 is_invariant, reason = verify_executable_ast_invariance(
                     original_content, proposed_content
                 )
                 if not is_invariant:
-                    raise FixError(
-                        f"Patch validation failed for '{rel_path}': AI-DOCS task violated executable AST invariance: {reason}"
+                    file_rejection = (
+                        f"Patch validation failed for '{rel_path}': AI-DOCS task violated "
+                        f"executable AST invariance: {reason}"
                     )
+
+        if file_rejection is not None:
+            logger.warning("Dropping patch for '%s': %s", rel_path, file_rejection)
+            task_failures.append({
+                "task_id": ", ".join(str(t.task_id) for t in tasks),
+                "file_path": rel_path,
+                "instruction_type": "",
+                "reason": file_rejection,
+            })
+            continue
 
         # Generate standard Git-compatible unified diff
         diff_lines = list(
@@ -1013,11 +1129,32 @@ def generate_preview_patch(
 
         if diff_lines:
             file_diff_str = "\n".join(diff_lines) + "\n"
-            file_inst_type = (
-                "AI-DOCS"
-                if any(getattr(t, "instruction_type", None) == "AI-DOCS" for t in tasks)
-                else None
-            )
+
+            # Screen what this change introduces so dangerous constructs are called out in
+            # the diff preview instead of depending on the reviewer spotting a single line.
+            from codepilot.core.patch_risk import screen_file_change
+
+            risk_findings = [
+                f.to_dict()
+                for f in screen_file_change(rel_path, original_content, proposed_content)
+            ]
+
+            # Record the effective instruction type for the file so that apply-time
+            # invariance enforcement matches preview-time enforcement exactly.
+            #
+            # "AI-DOCS" is recorded only when every task for this file is documentation-only.
+            # When the file also carries executable work, the driving non-docs type is
+            # recorded instead -- an explicit value is required so the patcher does not fall
+            # back to scanning the file body for an 'AI-DOCS' marker and wrongly subject a
+            # mixed change to documentation-only invariance rules.
+            task_types = [getattr(t, "instruction_type", None) for t in tasks]
+            non_docs = [t for t in task_types if t and t != "AI-DOCS"]
+            if tasks and not non_docs and any(t == "AI-DOCS" for t in task_types):
+                file_inst_type = "AI-DOCS"
+            elif non_docs:
+                file_inst_type = non_docs[0]
+            else:
+                file_inst_type = None
             file_patches.append(
                 FilePatch(
                     file_path=rel_path,
@@ -1026,6 +1163,7 @@ def generate_preview_patch(
                     proposed_content=proposed_content,
                     diff=file_diff_str,
                     instruction_type=file_inst_type,
+                    risk_findings=risk_findings,
                 )
             )
             full_diff_pieces.append(file_diff_str)
@@ -1044,11 +1182,26 @@ def generate_preview_patch(
             else q["question"]
             for q in clarification_questions
         )
-    status = (
-        "success"
-        if file_patches
-        else ("clarification_requested" if clarification_questions else "no_modifications")
-    )
+    # Nothing usable was produced and something went wrong: there is no partial result to
+    # stage, so report the failures as an error rather than returning an empty bundle that
+    # looks like "no work to do".
+    if not file_patches and not clarification_questions and task_failures:
+        detail = "\n\n".join(
+            f"- [{f['file_path']} {f['task_id']}] {f['reason']}" for f in task_failures
+        )
+        if len(task_failures) == 1:
+            raise FixError(task_failures[0]["reason"])
+        raise FixError(
+            f"All {len(task_failures)} task(s) failed; no patch was generated.\n\n{detail}"
+        )
+
+    if file_patches:
+        status = "partial_success" if task_failures else "success"
+    elif clarification_questions:
+        status = "clarification_requested"
+    else:
+        status = "no_modifications"
+
     bundle = PatchBundle(
         patch_id=f"patch-{patch_id_hash}" if file_patches else "patch-empty",
         created_at=datetime.now(timezone.utc).isoformat(),
@@ -1062,6 +1215,7 @@ def generate_preview_patch(
         output_source="mock" if is_mock else "model",
         status=status,
         clarification_question=clarification_str,
+        task_failures=task_failures,
     )
 
     # Save to pending patch file for approval workflow only if modifications exist
@@ -1089,7 +1243,13 @@ def save_pending_patch(project_root: Path, patch_bundle: PatchBundle) -> Path:
 
 
 def load_pending_patch(project_root: Path) -> Optional[PatchBundle]:
-    """Load pending patch bundle from disk if it exists."""
+    """Load pending patch bundle from disk if it exists.
+
+    Raises:
+        FixError: If a pending patch file exists but cannot be parsed. A damaged patch
+            is reported as such rather than silently presented as "no pending patch",
+            which previously sent developers to re-run 'fix' with no explanation.
+    """
     target_file = get_pending_patch_path(project_root)
     if not target_file.is_file():
         return None
@@ -1098,4 +1258,7 @@ def load_pending_patch(project_root: Path) -> Optional[PatchBundle]:
         return PatchBundle.from_dict(data)
     except Exception as e:
         logger.warning("Could not read pending patch from %s: %s", target_file, e)
-        return None
+        raise FixError(
+            f"The pending patch file at '{target_file}' is damaged and could not be read: {e}\n"
+            "Delete the file and run 'codepilot fix --preview' again to regenerate it."
+        ) from e

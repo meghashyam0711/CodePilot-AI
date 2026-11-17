@@ -466,16 +466,46 @@ class CodePilotApp:
         )
 
         # 8. Model Runtime & Inference Engine check
+        #
+        # A configured provider name is not evidence of a working runtime, so the
+        # configured backend is actually probed. Without this, 'doctor' reported a
+        # healthy environment while the Ollama daemon was unreachable or the configured
+        # model was not installed -- exactly what this command exists to catch.
         provider = (self.config.model_provider or "none").strip().lower()
         model_details = f"Configured provider: '{provider}'"
         model_remediation = None
+        model_passed = provider != "none"
+
         if provider == "none":
             model_remediation = "Configure model_provider ('ollama', 'standalone', or 'mock') in .codepilot.toml"
+        elif provider != "mock":
+            try:
+                from codepilot.core.models.factory import create_model_client
+
+                client = create_model_client(config=self.config)
+                healthy, message = client.health_check()
+                model_passed = bool(healthy)
+                model_details = f"Configured provider: '{provider}' — {message}"
+                if not healthy:
+                    model_remediation = (
+                        "Start the local model runtime and install the configured model, "
+                        "or set model_provider = 'mock' for offline use."
+                    )
+            except Exception as e:
+                model_passed = False
+                model_details = (
+                    f"Configured provider: '{provider}' — runtime could not be initialized: {e}"
+                )
+                model_remediation = (
+                    "Verify the provider configuration and that required runtime "
+                    "dependencies are installed."
+                )
+
         report.checks.append(
             DiagnosticCheck(
                 name="Model Runtime Interface",
                 category="Runtime",
-                passed=provider != "none",
+                passed=model_passed,
                 details=model_details,
                 remediation=model_remediation,
                 is_critical=False,
