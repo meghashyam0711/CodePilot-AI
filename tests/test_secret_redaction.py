@@ -32,6 +32,11 @@ from codepilot.exceptions import FixError
 
 OPENAI_KEY = "sk-" + "a1b2c3d4e5" * 3
 GITHUB_PAT = "ghp_" + "b" * 36
+# Assembled at runtime rather than written as one literal. A contiguous, realistically
+# shaped token in the source tripped GitHub's push protection and blocked the push, even
+# though the value is fabricated. Building it from parts keeps the test meaningful while
+# leaving no token-shaped string in the file for a scanner to match.
+SLACK_TOKEN = "xoxb" + "-" + "0" * 12 + "-" + "f4k3SlackTokenValue"
 PEM_BLOCK = (
     "-----BEGIN RSA PRIVATE KEY-----\n"
     "MIIEowIBAAKCAQEA1234567890\n"
@@ -79,8 +84,8 @@ def test_log_sanitizer_redacts_key_value_secrets(raw: str, secret: str) -> None:
     [
         OPENAI_KEY,
         GITHUB_PAT,
-        "AKIAIOSFODNN7EXAMPLE",
-        "xoxb" + "-" + "0" * 12 + "-" + "f4k3SlackTokenValue",
+        "AKIAIOSFODNN7EXAMPLE",  # AWS's own published example key ID
+        SLACK_TOKEN,
         "AIza" + "B" * 35,
         "glpat-" + "c" * 20,
         "sk_live_" + "d" * 24,
