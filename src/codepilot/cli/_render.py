@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from rich.markup import escape
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.table import Table
 from codepilot.core.evaluation import EvaluationReport
 from codepilot.core.scanner import SOURCE_EXTENSIONS

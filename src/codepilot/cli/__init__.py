@@ -57,4 +57,11 @@ __all__ = [
     "console",
     "err_console",
     "main",
+    # Re-exported from _render so that 'codepilot.cli' stays the single import point for
+    # the CLI surface after the package split. Listed explicitly so they are not mistaken
+    # for unused imports and removed -- the test suite imports them from here.
+    "_looks_like_file_path",
+    "_render_evaluation_terminal_scorecard",
+    "_render_patch_risk_warning",
+    "_render_skipped_tasks",
 ]

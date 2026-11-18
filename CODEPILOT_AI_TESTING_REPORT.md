@@ -452,15 +452,15 @@ No remaining **defect** is known to be unfixed except AUDIT-13. The following ar
 | **R-2** | Medium | ~~Make multi-task patches resilient.~~ **IMPLEMENTED — see §20.** |
 | **R-3** | Medium | ~~Consolidate secret redaction; scrub file content entering LLM context.~~ **IMPLEMENTED — see §19.** |
 | **R-4** | Low | Have `ProjectContextEngine.build_context()` enforce the repository boundary itself rather than trusting callers (S-25). |
-| **R-5** | Low | Add an `--approved` gate to `rollback` for consistency with `apply`/`test` and stated principle #3 (S-27). **Deliberately not changed here**: three existing tests assert that bare `rollback` succeeds, so this is a documented UX contract change for you to approve. The data-loss hazard itself is already fixed (AUDIT-02). |
-| **R-6** | Low | Stream and cap child-process output incrementally instead of buffering it all in memory before truncating (P-03). |
+| **R-5** | Low | ~~Add an `--approved` gate to `rollback`.~~ **IMPLEMENTED — see §21.** |
+| **R-6** | Low | ~~Stream and cap child-process output incrementally.~~ **IMPLEMENTED — see §21.** |
 | **R-7** | Medium | ~~Give `test` its own timeout setting; use process-group termination.~~ **IMPLEMENTED — see §18.** |
 | **R-8** | Low | Enforce `max_input_size` on the `--issue` text; a 20,000-character instruction is accepted today and bloats the prompt (E-02). |
 | **R-9** | Low | Wrap raw Pydantic validation errors (including the `errors.pydantic.dev` URL) in a plain-language configuration message (E-16, E-22). |
 | **R-10** | Low | Add bounded retry with backoff for transient model failures (AUDIT-13). |
 | **R-11** | Low | Reduce the advertised `ModelProvider` enum to what actually works, or reject cloud providers at **config-validation** time rather than at use. |
-| **R-12** | Low | Add a `fix`-stage lock (as `test` has) so concurrent `fix` runs cannot race on `pending_patch.json` (P-07). |
-| **R-13** | Maintainability | Split the 111 KB / ~2,700-line `cli.py` into a `cli/` package by command group; separate presentation from orchestration. |
+| **R-12** | Low | ~~Add a `fix`-stage lock so concurrent runs cannot race on `pending_patch.json`.~~ **IMPLEMENTED — see §21.** |
+| **R-13** | Maintainability | ~~Split the monolithic `cli.py` into a `cli/` package by command group.~~ **IMPLEMENTED — see §21.** |
 | **R-14** | Housekeeping | ~~Remove committed build/experiment residue.~~ **IMPLEMENTED — see §20.** |
 | **R-15** | Documentation | ~~Update `README.md`.~~ **IMPLEMENTED — see §20.** |
 
@@ -785,14 +785,107 @@ The dead `SECRET_PATTERNS` constant that was also on R-14's list is no longer de
 
 | Still open | Priority |
 |---|---|
-| **R-6** stream/cap child output instead of buffering it all | Medium |
-| **R-12** add a `fix`-stage lock to prevent concurrent-run races | Medium |
+| ~~**R-6** stream/cap child output~~ — **done, §21** | — |
+| ~~**R-12** `fix`-stage lock~~ — **done, §21** | — |
 | **R-10** / AUDIT-13 retry + backoff on transient model failure | Low (your design call) |
 | **R-8** enforce `max_input_size` on `--issue` | Low |
 | **R-9** wrap raw Pydantic validation errors | Low |
 | **R-4** boundary check inside `ProjectContextEngine` | Low |
 | **R-11** trim or validate the `ModelProvider` enum | Low |
-| **R-5** `--approved` gate on `rollback` | Needs your decision (3 tests assert current behaviour) |
-| **R-13** split `cli.py` | Needs your decision (architectural) |
+| ~~**R-5** `--approved` gate on `rollback`~~ — **done, §21** | — |
+| ~~**R-13** split `cli.py`~~ — **done, §21** | — |
 
-Unchanged verification gaps: dependency CVE scanning **NOT TESTED**, the POSIX branch of `_is_pid_running()` **never executed** (Windows-only testing), the `evaluate` harness not run end-to-end, and no load or soak testing.
+Unchanged verification gaps: dependency CVE scanning **NOT TESTED**, the POSIX branch of the process-liveness check **never executed** (Windows-only testing), the `evaluate` harness not run end-to-end, and no load or soak testing.
+
+---
+
+## 21. Follow-Up Work: R-6, R-12, R-5 and R-13 Implemented
+
+The final round, closing every recommendation that did not require a product decision.
+**Test suite: 585 → 610 passing, 0 failed** (+25 in `tests/test_concurrency_and_limits.py`).
+
+### 21.1 R-6 — output is bounded as it arrives
+
+**Problem (P-03).** `subprocess.communicate()` buffers a child's entire output in memory before any truncation can be applied, so the 64 KB guard never took effect in the case that mattered: a runaway suite printing gigabytes exhausted memory first.
+
+**Change.** A `_BoundedStreamReader` thread per pipe reads in 8 KB chunks and stops *accumulating* once the cap is reached, while continuing to drain so the child never blocks on a full pipe. `proc.wait()` replaces `communicate()`.
+
+Two refinements fell out of the change:
+
+- **Partial output is now retained on timeout.** Previously `stdout` was discarded entirely when a suite was killed; the output before the hang is usually the only evidence of *where* it hung.
+- `_terminate_process_tree()` now reaps with `wait()` rather than `communicate()`. Because the reader threads own and close the pipes, `communicate()` raised `ValueError: I/O operation on closed file` from its own internal reader threads — a latent fault surfaced by this work and fixed with it.
+
+**Measured** against a child emitting ~400 MB of stdout plus 5 MB of stderr:
+
+| | Result |
+|---|---|
+| Retained stdout / stderr | 65,591 bytes each (64 KB cap + truncation notice) |
+| **Python peak traced memory** | **0.3 MB** |
+| Elapsed | 0.8 s |
+| Small output (normal case) | passed through verbatim, not flagged as truncated |
+| Exit code / pass flag | preserved through streaming |
+
+### 21.2 R-12 — concurrent fix runs can no longer race
+
+**Problem (P-07).** `test` was serialized by a PID lock but `fix` was not, so two concurrent runs both wrote `.codepilot/patches/pending_patch.json` and the later silently overwrote the earlier. The developer could then approve a diff that no longer matched what they had reviewed.
+
+**Change.** The lock mechanism was extracted into **`src/codepilot/core/locking.py`** (`acquire_lock`, `release_lock`, `is_pid_running`) as a single implementation with stale-owner reclaim and fail-closed liveness, and `fix` now holds `.codepilot/fix.lock` for the duration of generation. `tester.py`'s `acquire_test_lock` / `release_test_lock` became thin wrappers over it, preserving their exact messages and behaviour.
+
+`generate_preview_patch` is a thin locking wrapper around `_generate_preview_patch_unlocked`, so the ~400-line body needed no re-indentation — the kind of mechanical edit that had already caused one duplicated-code slip earlier in this audit.
+
+Verified: the lock is released on success and on failure; a live lock rejects a second run **and leaves the first run's staged patch byte-identical**; a lock owned by a dead PID is reclaimed; a corrupt lock fails closed.
+
+### 21.3 R-5 — rollback requires explicit approval
+
+`rollback` was the only mutating command with no authorization gate, inconsistent with `apply`/`test` and with the project's stated principle #3. It now requires `--approved`.
+
+This was previously **deferred** because three existing tests asserted that a bare `rollback` succeeds. With the decision taken, those three tests were updated to pass `--approved`:
+`test_command_driven.py`, `test_phase9_security_recovery.py`, `test_phase10_integration.py`.
+
+One of this audit's own tests had to be strengthened rather than merely updated: `test_audit02_cli_rollback_refuses_to_discard_later_edits` invoked a bare `rollback` and asserted exit 1. With the new gate it would have **passed for the wrong reason** — rejected at the approval check, never reaching the divergence detection it exists to prove. It now passes `--approved` and asserts the `Unsaved Changes Detected` output explicitly.
+
+Verified: a bare `rollback` exits 1 with `Approval Required` **and performs no write**; `--approved` restores; `--list` stays frictionless (read-only); `--force` alone does **not** imply approval; the library primitive `rollback_patch()` is unchanged, since the gate belongs at the CLI boundary.
+
+### 21.4 R-13 — `cli.py` split into a package
+
+The 2,902-line / 122 KB module became `src/codepilot/cli/`:
+
+| Module | Contents |
+|---|---|
+| `_context.py` | the shared Typer `app` and the two consoles |
+| `_render.py` | shared terminal rendering (risk findings, skipped tasks, scorecard) |
+| `project.py` | `init`, `status`, `doctor`, root callback |
+| `inspection.py` | `scan`, `tasks`, `explain`, `analyze`, `plan` (all read-only) |
+| `modify.py` | `fix`, `diff`, `apply`, `rollback` (the commands that can write) |
+| `verify.py` | `test`, `evaluate` |
+| `__init__.py` | re-exports the public surface; importing it registers every command |
+| `__main__.py` | keeps `python -m codepilot.cli` working, which a package otherwise loses |
+
+Four tests patched implementation locations (`codepilot.cli.create_model_client`, `codepilot.cli.app`) that a split necessarily relocates, and were repointed. `__all__` now declares the `_render` re-exports explicitly, so a future lint pass cannot strip imports the test suite depends on.
+
+**A split fails loudly only on code paths that run**, so coverage alone was not treated as sufficient:
+
+| Check | Result |
+|---|---|
+| AST undefined-name scan across all 8 modules | **0 problems** |
+| All 14 commands registered and `--help` builds for each | **PASS** |
+| `python -m codepilot.cli` and the `console_scripts` entry point load `main()` | **PASS** |
+| Public import surface (`app`, `main`, consoles, 4 render helpers) | **PASS** |
+| Real workflow through the package: scan → analyze → plan → fix → diff → apply → rollback → status → doctor | **PASS** |
+| Approval gates still enforced (`apply`, `rollback`) | **PASS** |
+| **32 package checks total** | **32 PASS / 0 FAIL** |
+
+### 21.5 A regression found in the follow-up pass, and corrected
+
+A documentation/style pass over the new package had rewritten `main()` to catch bare `Exception` and print `Fatal error: …`. That is worse than what it replaced: it swallows programming errors such as `AttributeError` and flattens them into a single line, discarding the traceback that makes a bug diagnosable. `main()` now again catches only `CodePilotError` for clean user-facing messaging and lets anything unexpected propagate with its traceback — verified both ways (clean message + exit 1 for a `CodePilotError`; full traceback preserved for an `AttributeError`). An unused `APP_NAME` import introduced in `_context.py` by the same pass was removed.
+
+### 21.6 Status: all recommendations closed except two deferred by design
+
+| Recommendation | State |
+|---|---|
+| R-1, R-2, R-3, R-5, R-6, R-7, R-12, R-13, R-14, R-15 | **Implemented** |
+| R-4 (boundary check inside `ProjectContextEngine`) | Open — defence-in-depth only; correct today because `fixer.py` validates first |
+| R-8 (`max_input_size` on `--issue`), R-9 (wrap Pydantic errors), R-11 (trim `ModelProvider` enum) | Open — low-value polish |
+| R-10 / AUDIT-13 (model retry + backoff) | **Deliberately not done** — changes cost, latency and failure semantics for every call; a product decision, not a bug fix |
+
+Verification gaps are unchanged and still apply: dependency CVE scanning was never run, the POSIX branch of `is_pid_running()` has never executed on this Windows-only setup, the `evaluate` harness was not run end-to-end, and there has been no load or soak testing.
